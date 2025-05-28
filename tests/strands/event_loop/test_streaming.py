@@ -146,6 +146,20 @@ def test_handle_content_block_start(chunk: ContentBlockStartEvent, exp_tool_use)
             {},
             {},
         ),
+        # Reasoning - RedactedContent - Existing
+        (
+            {"delta": {"reasoningContent": {"redactedContent": " content"}}},
+            {"redactedContent": "Redacted"},
+            {"redactedContent": "Redacted content"},
+            {"redactedContent": " content", "reasoning": True},
+        ),
+        # Reasoning - RedactedContent - New
+        (
+            {"delta": {"reasoningContent": {"redactedContent": "Redacted"}}},
+            {},
+            {"redactedContent": "Redacted"},
+            {"redactedContent": "Redacted", "reasoning": True},
+        ),
     ],
 )
 def test_handle_content_block_delta(event: ContentBlockDeltaEvent, state, exp_updated_state, exp_handler_args):
@@ -243,6 +257,23 @@ def test_handle_content_block_delta(event: ContentBlockDeltaEvent, state, exp_up
                 "current_tool_use": {},
                 "text": "",
                 "reasoningText": "",
+            },
+        ),
+        # RedactedContent
+        (
+            {
+                "content": [],
+                "current_tool_use": {},
+                "text": "",
+                "reasoningText": "",
+                "redactedContent": "This content was redacted",
+            },
+            {
+                "content": [{"reasoningContent": {"redactedContent": "This content was redacted"}}],
+                "current_tool_use": {},
+                "text": "",
+                "reasoningText": "",
+                "redactedContent": "",
             },
         ),
     ],
@@ -355,6 +386,35 @@ def test_extract_usage_metrics():
             {"calls": 1},
             [{"role": "user", "content": [{"text": "REDACTED"}]}],
         ),
+        # Test redacted content streaming
+        (
+            [
+                {"messageStart": {"role": "assistant"}},
+                {"contentBlockStart": {"start": {}}},
+                {
+                    "contentBlockDelta": {
+                        "delta": {"reasoningContent": {"redactedContent": "This content was redacted"}}
+                    },
+                },
+                {"contentBlockStop": {}},
+                {"messageStop": {"stopReason": "end_turn"}},
+                {
+                    "metadata": {
+                        "usage": {"inputTokens": 1, "outputTokens": 1, "totalTokens": 1},
+                        "metrics": {"latencyMs": 1},
+                    }
+                },
+            ],
+            "end_turn",
+            {
+                "role": "assistant",
+                "content": [{"reasoningContent": {"redactedContent": "This content was redacted"}}],
+            },
+            {"inputTokens": 1, "outputTokens": 1, "totalTokens": 1},
+            {"latencyMs": 1},
+            {"calls": 1},
+            [{"role": "user", "content": [{"text": "Some input!"}]}],
+        ),
     ],
 )
 def test_process_stream(
@@ -422,3 +482,43 @@ def test_stream_messages(agent):
         None,
         "test prompt",
     )
+
+
+def test_process_stream_mixed_content():
+    def callback_handler(**kwargs):
+        if "request_state" in kwargs:
+            kwargs["request_state"].setdefault("calls", 0)
+            kwargs["request_state"]["calls"] += 1
+
+    response = [
+        {"messageStart": {"role": "assistant"}},
+        {"contentBlockStart": {"start": {}}},
+        {"contentBlockDelta": {"delta": {"text": "Normal text"}}},
+        {"contentBlockStop": {}},
+        {"contentBlockStart": {"start": {}}},
+        {"contentBlockDelta": {"delta": {"reasoningContent": {"redactedContent": "Redacted content"}}}},
+        {"contentBlockStop": {}},
+        {"messageStop": {"stopReason": "end_turn"}},
+        {
+            "metadata": {
+                "usage": {"inputTokens": 1, "outputTokens": 1, "totalTokens": 1},
+                "metrics": {"latencyMs": 1},
+            }
+        },
+    ]
+
+    exp_message = {
+        "role": "assistant",
+        "content": [
+            {"text": "Normal text"},
+            {"reasoningContent": {"redactedContent": "Redacted content"}},
+        ],
+    }
+
+    tru_messages = [{"role": "user", "content": [{"text": "Some input!"}]}]
+
+    tru_stop_reason, tru_message, tru_usage, tru_metrics, tru_request_state = (
+        strands.event_loop.streaming.process_stream(response, callback_handler, tru_messages)
+    )
+
+    assert tru_message == exp_message
