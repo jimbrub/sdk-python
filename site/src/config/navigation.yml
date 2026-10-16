@@ -352,6 +352,8 @@ sidebar:
               - docs/user-guide/sdk/context-management/context-estimation
           - label: "Retry strategies"
             slug: docs/user-guide/sdk/agents/retry-strategies
+          - label: "Structured output"
+            slug: docs/user-guide/sdk/agents/structured-output-behavior
           - label: Interrupts
             items:
               - label: "Overview"
