@@ -276,7 +276,12 @@ class _SubagentTool(AgentTool):
         return child, prompt
 
     def _finalize_result(
-        self, tool_use_id: str, tool_use: ToolUse, child: Agent, result: Any
+        self,
+        tool_use_id: str,
+        tool_use: ToolUse,
+        child: Agent,
+        result: Any,
+        child_cancel_signal_set: bool,
     ) -> ToolResultEvent | ToolInterruptEvent:
         """Map the child's result to the terminal event for the parent."""
         if result is None:
@@ -285,7 +290,9 @@ class _SubagentTool(AgentTool):
         if result.stop_reason == "interrupt" and result.interrupts:
             self._pending[tool_use_id] = child
             return ToolInterruptEvent(tool_use, list(result.interrupts))
-        if result.stop_reason == "cancelled":
+        # Immediate cancel (signal set) is an abort → error; the stop tool's deferred cancel
+        # never sets the signal and resolves as a normal completion.
+        if result.stop_reason == "cancelled" and child_cancel_signal_set:
             self._pending.pop(tool_use_id, None)
             return self._error_result(tool_use_id, "Subagent was cancelled.")
         self._pending.pop(tool_use_id, None)
@@ -315,13 +322,17 @@ class _SubagentTool(AgentTool):
             )
             child_state = {**invocation_state} if isinstance(invocation_state, dict) else invocation_state
             result = None
+            # Captured before stream_async's finally clears it.
+            child_cancel_signal_set = False
             async for event in child.stream_async(prompt, invocation_state=child_state, cancel_signal=cancel_signal):
                 if "result" in event:
                     result = event["result"]
+                    child_signal = getattr(child, "cancel_signal", None)
+                    child_cancel_signal_set = child_signal is not None and child_signal.is_set()
                 else:
                     yield ToolStreamEvent(tool_use, event)
 
-            yield self._finalize_result(tool_use_id, tool_use, child, result)
+            yield self._finalize_result(tool_use_id, tool_use, child, result, child_cancel_signal_set)
         except Exception as exc:
             self._pending.pop(tool_use_id, None)
             logger.warning(

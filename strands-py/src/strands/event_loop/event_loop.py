@@ -11,6 +11,7 @@ The event loop allows agents to:
 import copy
 import logging
 import uuid
+import warnings
 from collections.abc import AsyncGenerator, Callable
 from typing import TYPE_CHECKING, Any
 
@@ -651,6 +652,15 @@ async def _handle_model_execution(
 
             await agent.hooks.invoke_callbacks_async(after_model_call_event)
 
+            # Applied after hooks so AfterModelCallEvent observers see the real model output.
+            # Build a new Message rather than mutating in place so hooks that captured the
+            # pre-cancel object see unmodified content; rewrite the yielded stop_event so
+            # downstream readers of ``.message`` and ``event["stop"]`` see the cancel text.
+            if stop_reason == "cancelled" and agent._cancel_message is not None:
+                message = Message(role=message["role"], content=[{"text": agent._cancel_message}])
+                stop_event._message = message
+                stop_event["stop"] = (stop_reason, message, usage, metrics)
+
             # Check if hooks want to retry the model call
             if after_model_call_event.retry:
                 agent.event_loop_metrics.update_usage(usage)
@@ -966,10 +976,6 @@ async def _handle_tool_execution(
 
     yield ToolResultMessageEvent(message=tool_result_message)
 
-    # End the cycle span before yielding the recursive cycle.
-    if cycle_span:
-        tracer.end_event_loop_cycle_span(span=cycle_span, message=message, tool_result_message=tool_result_message)
-
     agent.event_loop_metrics.end_cycle(cycle_start_time, cycle_trace)
 
     # Hook requested halt: exit without calling the model again.
@@ -983,6 +989,10 @@ async def _handle_tool_execution(
             end_turn_content = [{"text": "Turn ended early by hook after tool execution"}]
         end_turn_message: Message = {"role": "assistant", "content": end_turn_content}
         await agent._append_messages(end_turn_message)
+        if cycle_span:
+            tracer.end_event_loop_cycle_span(
+                span=cycle_span, message=end_turn_message, tool_result_message=tool_result_message
+            )
         yield EventLoopStopEvent(
             "end_turn",
             end_turn_message,
@@ -992,7 +1002,33 @@ async def _handle_tool_execution(
         )
         return
 
-    if invocation_state["request_state"].get("stop_event_loop", False) or structured_output_context.stop_loop:
+    # Explicit cancel wins over structured-output stop so its terminal message is honored.
+    if agent._deferred_cancel or agent._observe_cancellation():
+        if agent._cancel_message is not None:
+            message = {"role": "assistant", "content": [{"text": agent._cancel_message}]}
+            await agent._append_messages(message)
+        if cycle_span:
+            tracer.end_event_loop_cycle_span(span=cycle_span, message=message, tool_result_message=tool_result_message)
+        yield EventLoopStopEvent(
+            "cancelled",
+            message,
+            agent.event_loop_metrics,
+            invocation_state["request_state"],
+            structured_output=structured_output_result,
+        )
+        return
+
+    # Deprecated path: the pre-0019 stop tool wrote this flag into user-owned
+    # invocation_state. Honor it with a warning so existing callers keep working
+    # until they migrate to agent.cancel(after_current_tools=True).
+    if invocation_state["request_state"].get("stop_event_loop", False):
+        warnings.warn(
+            "request_state['stop_event_loop'] is deprecated; call agent.cancel(after_current_tools=True) instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        if cycle_span:
+            tracer.end_event_loop_cycle_span(span=cycle_span, message=message, tool_result_message=tool_result_message)
         yield EventLoopStopEvent(
             stop_reason,
             message,
@@ -1002,14 +1038,21 @@ async def _handle_tool_execution(
         )
         return
 
-    if agent._observe_cancellation():
+    if structured_output_context.stop_loop:
+        if cycle_span:
+            tracer.end_event_loop_cycle_span(span=cycle_span, message=message, tool_result_message=tool_result_message)
         yield EventLoopStopEvent(
-            "cancelled",
+            stop_reason,
             message,
             agent.event_loop_metrics,
             invocation_state["request_state"],
+            structured_output=structured_output_result,
         )
         return
+
+    # End the cycle span before the checkpoint pause or the recursive cycle.
+    if cycle_span:
+        tracer.end_event_loop_cycle_span(span=cycle_span, message=message, tool_result_message=tool_result_message)
 
     # Emit after_tools checkpoint. Only fires on tool_use cycles: a model that
     # returns end_turn first never reaches this branch.

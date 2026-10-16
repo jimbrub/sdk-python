@@ -34,6 +34,12 @@ The :data:`handoff_to_user` tool pauses the agent loop and surfaces a message to
 the user for human-in-the-loop input; use :func:`make_handoff_to_user` to supply
 a custom tool name or description.
 
+The :data:`stop` tool lets the model gracefully end the agent loop with an
+optional final message; use :func:`make_stop` to supply a custom tool name,
+description, or message length cap. It is a cooperative stop: sibling tools
+in the same batch still run to completion, then the loop exits with
+``stop_reason == "cancelled"``.
+
 The :func:`make_subagent` factory produces a ``subagent`` delegation tool that runs a
 self-contained task in an isolated child agent and returns a final report.
 Authority-mode axes let the developer pin what the model can configure on each child.
@@ -46,10 +52,10 @@ Example Usage:
     ```python
     from strands import Agent
     from strands.vended_tools import (
-        file_editor, handoff_to_user, http_request, notebook, shell, sleep, web_fetch
+        file_editor, handoff_to_user, http_request, notebook, shell, sleep, stop, web_fetch
     )
 
-    agent = Agent(tools=[file_editor, handoff_to_user, http_request, notebook, shell, sleep, web_fetch])
+    agent = Agent(tools=[file_editor, handoff_to_user, http_request, notebook, shell, sleep, stop, web_fetch])
     ```
 """
 
@@ -65,6 +71,7 @@ from .notebook import make_notebook, notebook
 from .python_repl import make_python_repl, python_repl
 from .shell import make_shell, shell
 from .sleep import make_sleep, sleep
+from .stop import make_stop, stop
 from .subagent import make_subagent, subagent
 from .swarm import make_swarm, swarm
 
@@ -111,12 +118,14 @@ __all__ = [
     "make_python_repl",
     "make_shell",
     "make_sleep",
+    "make_stop",
     "make_subagent",
     "make_swarm",
     "notebook",
     "python_repl",
     "shell",
     "sleep",
+    "stop",
     "subagent",
     "swarm",
 ]

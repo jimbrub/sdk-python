@@ -22,7 +22,9 @@ class _FakeResult:
 
 
 class _FakeChild:
-    def __init__(self, *results, activated=False):
+    def __init__(self, *results, activated=False, cancel_signal_set=False):
+        import threading
+
         self._results = list(results)
         self.messages: list = []
         self.prompts: list = []
@@ -30,6 +32,9 @@ class _FakeChild:
         self.cancel_signals: list = []
         self.state = AgentState()
         self._interrupt_state = SimpleNamespace(activated=activated, interrupts={})
+        self.cancel_signal = threading.Event()
+        if cancel_signal_set:
+            self.cancel_signal.set()
 
     async def stream_async(self, prompt, invocation_state=None, cancel_signal=None):
         self.prompts.append(prompt)
@@ -385,11 +390,22 @@ async def test_child_exception_becomes_error_result():
 
 
 @pytest.mark.asyncio
-async def test_cancelled_child_becomes_error_result():
-    child = _FakeChild(_FakeResult(stop_reason="cancelled"))
+async def test_immediate_cancel_becomes_error_result():
+    """A child cancelled via its signal (abort) surfaces as an error."""
+    child = _FakeChild(_FakeResult(stop_reason="cancelled"), cancel_signal_set=True)
     tool = make_subagent(builder=lambda spec: child, presets={"generalist": GENERALIST})
     result = _result(await _events(tool, {"task": "x"}))
     assert result["status"] == "error" and "cancelled" in result["content"][0]["text"].lower()
+
+
+@pytest.mark.asyncio
+async def test_deferred_cancel_from_stop_tool_becomes_success():
+    """A child stopped via the stop tool (deferred cancel, signal unset) is a success."""
+    child = _FakeChild(_FakeResult(text="task summary", stop_reason="cancelled"))
+    tool = make_subagent(builder=lambda spec: child, presets={"generalist": GENERALIST})
+    result = _result(await _events(tool, {"task": "x"}))
+    assert result["status"] == "success"
+    assert result["content"][0]["text"] == "task summary"
 
 
 @pytest.mark.asyncio
