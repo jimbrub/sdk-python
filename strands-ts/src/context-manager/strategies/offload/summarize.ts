@@ -44,11 +44,37 @@ export class SummarizeStrategy extends BaseOffloadStrategy {
   }
 
   override async apply(context: ContextState): Promise<boolean> {
-    if (!this._resolveModel(context.agent)) {
+    const model = this._resolveModel(context.agent)
+    if (this._isRetroactive && model?.requiresServerSideCompaction) {
+      return this._applyServerSide(context, model)
+    }
+    if (!model) {
       logger.warn('no model available for summarization')
       return false
     }
     return super.apply(context)
+  }
+
+  /**
+   * Reduces context through the provider's server-side compaction.
+   *
+   * Routed here instead of the client-side path above whenever the strategy is retroactive
+   * (`utilization` is set, or `preserveRecent > 0` on a per-block strategy — see
+   * `BaseOffloadStrategy`'s constructor) and the resolved model's `requiresServerSideCompaction`
+   * is `true`: rewriting messages the model already saw a request over would invalidate any
+   * preserved-thinking block kept after the edit. `utilization`/`preservedMessages` are passed
+   * straight through to `model.compact`, matching the conditions this strategy was configured
+   * with — see `team/designs/0022-preserved-thinking-support.md`.
+   */
+  private async _applyServerSide(context: ContextState, model: Model): Promise<boolean> {
+    const compacted = await model.compact(context.messages, {
+      utilization: context.utilization,
+      preservedMessages: this._preserveRecent,
+    })
+    if (!compacted) return false // provider produced no summary, so leave the history unchanged
+
+    context.messages.splice(0, context.messages.length, ...compacted) // [compaction message, ...preserved]
+    return true
   }
 
   protected override async _applyPerMessage(context: ContextState): Promise<boolean> {

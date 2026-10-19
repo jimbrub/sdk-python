@@ -1311,6 +1311,95 @@ describe('AnthropicModel', () => {
     })
   })
 
+  describe('compact', () => {
+    function createCompactionResponse(
+      content: string | null = 'summary',
+      signature = 'sig',
+      encrypted_content: string | undefined = undefined
+    ) {
+      return { content: [{ type: 'compaction', content, signature, encrypted_content }] }
+    }
+
+    function createCompactClient(mockCreate: ReturnType<typeof vi.fn>): Anthropic {
+      return {
+        messages: { stream: vi.fn(), countTokens: vi.fn() },
+        beta: { messages: { create: mockCreate } },
+      } as unknown as Anthropic
+    }
+
+    function makeMessages(): Message[] {
+      return [
+        new Message({ role: 'user', content: [new TextBlock('old1')] }),
+        new Message({ role: 'assistant', content: [new TextBlock('old2')] }),
+        new Message({ role: 'user', content: [new TextBlock('recent')] }),
+      ]
+    }
+
+    it('compacts older messages and preserves the tail', async () => {
+      const mockCreate = vi.fn(async (..._args: unknown[]) => createCompactionResponse())
+      const client = createCompactClient(mockCreate)
+      const model = new AnthropicModel({ client, modelId: 'claude-sonnet-4-6' })
+      const messages = makeMessages()
+
+      const result = await model.compact(messages, { preservedMessages: 1 })
+
+      expect(result).toBeDefined()
+      expect(result![0]!.role).toBe('assistant')
+      expect((result![0]!.content[0] as unknown as { content: string; signature: string }).content).toBe('summary')
+      expect(result!.slice(1)).toEqual(messages.slice(2))
+    })
+
+    it('sends the compaction param and beta header, sending only the older messages', async () => {
+      const mockCreate = vi.fn(async (..._args: unknown[]) => createCompactionResponse())
+      const client = createCompactClient(mockCreate)
+      const model = new AnthropicModel({ client, modelId: 'claude-sonnet-4-6' })
+      const messages = makeMessages()
+
+      await model.compact(messages, { utilization: 0.9, preservedMessages: 1 })
+
+      expect(mockCreate).toHaveBeenCalledOnce()
+      const call = mockCreate.mock.calls[0]![0] as { compaction: unknown; betas: unknown; messages: unknown[] }
+      expect(call.compaction).toEqual({ type: 'summarize' })
+      expect(call.betas).toEqual(['compact-2026-09-04'])
+      expect(call.messages).toHaveLength(2)
+    })
+
+    it('returns undefined when the provider reports a failed compaction', async () => {
+      const mockCreate = vi.fn(async (..._args: unknown[]) => createCompactionResponse(null))
+      const client = createCompactClient(mockCreate)
+      const model = new AnthropicModel({ client, modelId: 'claude-sonnet-4-6' })
+
+      const result = await model.compact(makeMessages(), { preservedMessages: 1 })
+
+      expect(result).toBeUndefined()
+    })
+
+    it('returns undefined without calling the client when nothing is old enough to compact', async () => {
+      const mockCreate = vi.fn()
+      const client = createCompactClient(mockCreate)
+      const model = new AnthropicModel({ client, modelId: 'claude-sonnet-4-6' })
+
+      const result = await model.compact([new Message({ role: 'user', content: [new TextBlock('hi')] })], {
+        preservedMessages: 1,
+      })
+
+      expect(result).toBeUndefined()
+      expect(mockCreate).not.toHaveBeenCalled()
+    })
+
+    it('returns undefined when the request fails', async () => {
+      const mockCreate = vi.fn(async () => {
+        throw new Error('boom')
+      })
+      const client = createCompactClient(mockCreate)
+      const model = new AnthropicModel({ client, modelId: 'claude-sonnet-4-6' })
+
+      const result = await model.compact(makeMessages(), { preservedMessages: 1 })
+
+      expect(result).toBeUndefined()
+    })
+  })
+
   /**
    * Prompt caching via `cacheConfig`.
    *
