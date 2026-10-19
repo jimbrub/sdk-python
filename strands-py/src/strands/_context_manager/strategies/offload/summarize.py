@@ -68,6 +68,12 @@ class SummarizeStrategy(BaseOffloadStrategy):
     async def apply(self, context: ContextState) -> bool:
         """Apply summarization. Returns False if no model is available."""
         model = self._resolve_model(context.agent)
+        # Message-level gating (utilization/overflow) happens here, before the server-side branch,
+        # because that branch bypasses super().apply() -- which is the only place this check
+        # otherwise lives. Per-block strategies (no utilization) have no equivalent gate here;
+        # their own threshold check happens per-block, inside _apply_per_block.
+        if self._is_message_level and not context.overflow and context.utilization < self._utilization_threshold:  # type: ignore[operator]
+            return False
         if self._is_retroactive and model is not None and model.requires_server_side_compaction:
             return await self._apply_server_side(context, model)
         if not model:
@@ -86,10 +92,17 @@ class SummarizeStrategy(BaseOffloadStrategy):
         straight through to `model.compact`, matching the conditions this strategy was configured
         with — see `team/designs/0022-preserved-thinking-support.md`.
         """
+        # The compaction request must carry the same system prompt and tools as the live
+        # conversation -- Anthropic binds a thinking block's signature to the exact prefix
+        # (system + tools + history) that produced it, and rejects a compaction request whose
+        # system/tools differ from what generated the thinking blocks being replayed into it.
+        agent = context.agent
         compacted = await model.compact(
             context.messages,
             utilization=context.utilization,
             preserved_messages=self._preserve_recent,
+            tool_specs=agent.tool_registry.get_all_tool_specs(),
+            system_prompt=agent.system_prompt,
         )
         if compacted is None:
             return False  # provider produced no summary, so leave the history unchanged

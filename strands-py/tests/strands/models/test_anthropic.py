@@ -1036,6 +1036,27 @@ async def test_stream(anthropic_client, model, alist):
 
 
 @pytest.mark.asyncio
+async def test_stream_uses_beta_endpoint_when_requires_server_side_compaction(
+    anthropic_client, model_id, max_tokens, alist
+):
+    """Once a conversation can carry a provider-signed `compaction` block, every request --
+    not just the one that creates it -- must go through the beta endpoint with the compaction
+    beta enabled; the non-beta endpoint rejects a `compaction` content block outright."""
+    model = AnthropicModel(model_id=model_id, max_tokens=max_tokens, requires_server_side_compaction=True)
+    anthropic_client.beta.messages.stream.return_value = generate_mock_stream_context(
+        [unittest.mock.Mock(type="message_start", model_dump=lambda: {"type": "message_start"})],
+        final_message=unittest.mock.Mock(usage=unittest.mock.Mock(model_dump=lambda: {})),
+    )
+
+    messages = [{"role": "user", "content": [{"text": "hello"}]}]
+    await alist(model.stream(messages, None, None))
+
+    anthropic_client.beta.messages.stream.assert_called_once()
+    assert anthropic_client.beta.messages.stream.call_args.kwargs["betas"] == ["compact-2026-09-04"]
+    anthropic_client.messages.stream.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_stream_early_termination(anthropic_client, model, alist, caplog):
     caplog.set_level(logging.WARNING, logger="strands.models.anthropic")
     mock_event = unittest.mock.Mock(

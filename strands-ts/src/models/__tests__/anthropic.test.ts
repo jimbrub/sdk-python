@@ -208,6 +208,30 @@ describe('AnthropicModel', () => {
   })
 
   describe('stream event handling', () => {
+    it('routes through the beta endpoint with the compaction beta when requiresServerSideCompaction', async () => {
+      // Once a conversation can carry a provider-signed `compaction` block, every request --
+      // not just the one that creates it -- must go through the beta endpoint with the
+      // compaction beta enabled; the non-beta endpoint rejects a `compaction` content block
+      // outright.
+      const betaStream = vi.fn(async function* (..._args: unknown[]) {
+        yield { type: 'message_start', message: { role: 'assistant', usage: { input_tokens: 10 } } }
+        yield { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 5 } }
+        yield { type: 'message_stop' }
+      })
+      const mockClient = {
+        messages: { stream: vi.fn(), countTokens: vi.fn() },
+        beta: { messages: { stream: betaStream, countTokens: vi.fn() } },
+      } as unknown as Anthropic
+      const provider = new AnthropicModel({ client: mockClient, requiresServerSideCompaction: true })
+      const messages = [new Message({ role: 'user', content: [new TextBlock('Hi')] })]
+
+      await collectIterator(provider.stream(messages))
+
+      expect(betaStream).toHaveBeenCalledOnce()
+      expect(betaStream.mock.calls[0]![1]).toMatchObject({ betas: ['compact-2026-09-04'] })
+      expect(mockClient.messages.stream).not.toHaveBeenCalled()
+    })
+
     it('yields correct event sequence for simple text response', async () => {
       const mockClient = createMockClient(async function* () {
         yield { type: 'message_start', message: { role: 'assistant', usage: { input_tokens: 10 } } }

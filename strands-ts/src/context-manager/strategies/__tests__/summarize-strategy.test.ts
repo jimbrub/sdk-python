@@ -221,7 +221,11 @@ describe('Offload.summarize', () => {
 
       expect(result).toBe(true)
       expect(compact).toHaveBeenCalledOnce()
-      expect(compact).toHaveBeenCalledWith(messages, { utilization: 0.9, preservedMessages: 1 })
+      expect(compact).toHaveBeenCalledWith(messages, {
+        utilization: 0.9,
+        preservedMessages: 1,
+        toolSpecs: [],
+      })
       expect(messages).toEqual([compactionMessage, preserved])
     })
 
@@ -253,6 +257,37 @@ describe('Offload.summarize', () => {
     it('does not route to compact when the strategy is not retroactive', () => {
       const strategy = Offload.summarize('toolResults').when({ threshold: 10 })
       expect((strategy as unknown as { _isRetroactive: boolean })._isRetroactive).toBe(false)
+    })
+
+    it('does not route to compact when utilization is below threshold', async () => {
+      // Regression: the message-level utilization/overflow gate must still apply to the
+      // server-side branch -- it must not fire on every apply() call just because the model
+      // requires server-side compaction.
+      const compact = vi.fn()
+      const mockModel = { stream: vi.fn(), requiresServerSideCompaction: true, compact }
+      const strategy = Offload.summarize('*').when({ utilization: 0.8 })
+      const messages = makeMessages()
+      const context = makeContext(messages, 0.2, mockModel)
+
+      const result = await strategy.apply(context)
+
+      expect(result).toBe(false)
+      expect(compact).not.toHaveBeenCalled()
+    })
+
+    it('routes to compact on overflow even below the utilization threshold', async () => {
+      const preserved = new Message({ role: 'user', content: [new TextBlock('recent')] })
+      const compactionMessage = new Message({ role: 'assistant', content: [] })
+      const compact = vi.fn(async () => [compactionMessage, preserved])
+      const mockModel = { stream: vi.fn(), requiresServerSideCompaction: true, compact }
+      const strategy = Offload.summarize('*').when({ utilization: 0.8 })
+      const messages = [new Message({ role: 'user', content: [new TextBlock('old1')] }), preserved]
+      const context: ContextState = { ...makeContext(messages, 0.2, mockModel), overflow: true }
+
+      const result = await strategy.apply(context)
+
+      expect(result).toBe(true)
+      expect(compact).toHaveBeenCalledOnce()
     })
   })
 

@@ -7,8 +7,8 @@
 import base64
 import json
 import logging
-import re
 import math
+import re
 import warnings
 from collections.abc import AsyncGenerator
 from typing import Any, TypeVar, cast
@@ -317,6 +317,17 @@ class AnthropicModel(Model):
 
             # Anthropic rejects reasoning text without a signature, which is how other model families emit it.
             return None
+
+        if "compaction" in content:
+            compaction = content["compaction"]
+            formatted: dict[str, Any] = {"type": "compaction"}
+            if "content" in compaction:
+                formatted["content"] = compaction["content"]
+            if "signature" in compaction:
+                formatted["signature"] = compaction["signature"]
+            if "encryptedContent" in compaction:
+                formatted["encrypted_content"] = compaction["encryptedContent"]
+            return formatted
 
         if "text" in content:
             return {"text": content["text"], "type": "text"}
@@ -981,7 +992,13 @@ class AnthropicModel(Model):
             count_tokens_fields = {"model", "messages", "tools", "tool_choice", "system"}
             request = {k: request[k] for k in request.keys() & count_tokens_fields}
 
-            response = await self.client.messages.count_tokens(**request)
+            # Mirrors stream(): once compaction is possible, history may carry a `compaction`
+            # block, which only the beta endpoint accepts.
+            count_tokens_resource = (
+                self.client.beta.messages if self.requires_server_side_compaction else self.client.messages
+            )
+            beta_kwargs: dict[str, Any] = {"betas": [_COMPACT_BETA]} if self.requires_server_side_compaction else {}
+            response = await count_tokens_resource.count_tokens(**request, **beta_kwargs)
             total_tokens: int = response.input_tokens
 
             logger.debug(
@@ -1143,9 +1160,15 @@ class AnthropicModel(Model):
         continuations = 0
         retry_with_drop_block = False
         retry_with_next_mechanism = False
+        # Once a conversation can carry a provider-signed compaction block, every request --
+        # not just the one that created it -- must go through the beta endpoint with the
+        # compaction beta enabled; the non-beta endpoint rejects a `compaction` content block
+        # outright ("Input tag 'compaction' ... does not match any of the expected tags").
+        messages_resource = self.client.beta.messages if self.requires_server_side_compaction else self.client.messages
+        beta_kwargs: dict[str, Any] = {"betas": [_COMPACT_BETA]} if self.requires_server_side_compaction else {}
         try:
             while True:
-                async with self.client.messages.stream(**request) as stream:
+                async with messages_resource.stream(**request, **beta_kwargs) as stream:
                     logger.debug("got response from model")
                     server_tool_block_indexes: set[int] = set()
                     next_block_index = block_index_offset

@@ -380,15 +380,24 @@ export abstract class Model<T extends BaseModelConfig = BaseModelConfig> {
    *   `conditions.preservedMessages`.
    * @param conditions - `utilization`, the context utilization that triggered this call (for
    *   providers that use it for logging/diagnostics — the decision to compact at all is made by
-   *   the caller), and `preservedMessages`, the count (\>= 1) or ratio ((0, 1)) of trailing
-   *   messages to keep verbatim, in the same shape as `OffloadConditions.preserveRecent`.
+   *   the caller), `preservedMessages`, the count (\>= 1) or ratio ((0, 1)) of trailing
+   *   messages to keep verbatim, in the same shape as `OffloadConditions.preserveRecent`, and
+   *   `systemPrompt`/`toolSpecs`, which the caller MUST pass through unchanged from the live
+   *   conversation: a provider that binds a thinking block's signature to its prefix (system +
+   *   tools + history) rejects the compaction request if either differs from what produced the
+   *   blocks being replayed into it.
    * @returns `[compaction message, ...preserved messages]`, or `undefined` when there was
    *   nothing to compact.
    * @throws Error - Always, unless overridden by a provider that supports it.
    */
   async compact(
     messages: Message[],
-    conditions: { utilization?: number; preservedMessages?: number } = {}
+    conditions: {
+      utilization?: number
+      preservedMessages?: number
+      systemPrompt?: SystemPrompt
+      toolSpecs?: ToolSpec[]
+    } = {}
   ): Promise<Message[] | undefined> {
     void messages
     void conditions

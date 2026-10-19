@@ -11,6 +11,7 @@ import {
 } from '../models/model.js'
 import { THINKING_BINDING_BETA, isThinkingBindingError, thinkingWithDropBlock } from './thinking-binding.js'
 import type { ContentBlock, SystemPrompt } from '../types/messages.js'
+import type { ToolSpec } from '../tools/types.js'
 import { Message, CompactionBlock } from '../types/messages.js'
 import type { ModelStreamEvent } from '../models/streaming.js'
 import { createEmptyUsage } from '../models/streaming.js'
@@ -276,9 +277,16 @@ export class AnthropicModel extends Model<AnthropicModelConfig> {
       }
 
       const requestOptions = this._buildRequestOptions()
-      const response = requestOptions
-        ? await this._client.messages.countTokens(params, requestOptions)
-        : await this._client.messages.countTokens(params)
+      // Mirrors stream(): once compaction is possible, history may carry a `compaction` block,
+      // which only the beta endpoint accepts.
+      const response = this.requiresServerSideCompaction
+        ? await this._client.beta.messages.countTokens(
+            { ...params, betas: [COMPACT_BETA] } as unknown as Anthropic.Beta.Messages.MessageCountTokensParams,
+            requestOptions
+          )
+        : requestOptions
+          ? await this._client.messages.countTokens(params, requestOptions)
+          : await this._client.messages.countTokens(params)
 
       logger.debug(`total_tokens=<${response.input_tokens}> | native token count`)
       return response.input_tokens
@@ -315,9 +323,14 @@ export class AnthropicModel extends Model<AnthropicModelConfig> {
    */
   override async compact(
     messages: Message[],
-    conditions: { utilization?: number; preservedMessages?: number } = {}
+    conditions: {
+      utilization?: number
+      preservedMessages?: number
+      systemPrompt?: SystemPrompt
+      toolSpecs?: ToolSpec[]
+    } = {}
   ): Promise<Message[] | undefined> {
-    const { utilization, preservedMessages = 0 } = conditions
+    const { utilization, preservedMessages = 0, systemPrompt, toolSpecs } = conditions
     const split = compactionSplitIndex(messages, preservedMessages)
     if (split <= 0) {
       logger.debug(
@@ -328,7 +341,14 @@ export class AnthropicModel extends Model<AnthropicModelConfig> {
 
     const older = messages.slice(0, split)
     const recent = messages.slice(split)
-    const request = this._formatRequest(older)
+    // The request must carry the same system prompt and tools as the live conversation --
+    // Anthropic binds a thinking block's signature to the exact prefix (system + tools + history)
+    // that produced it, and rejects a compaction request whose system/tools differ from what
+    // generated the thinking blocks being replayed into it.
+    const request = this._formatRequest(older, {
+      ...(systemPrompt !== undefined && { systemPrompt }),
+      ...(toolSpecs !== undefined && { toolSpecs }),
+    })
     delete (request as { stream?: boolean }).stream
 
     let response: Anthropic.Beta.Messages.BetaMessage
@@ -388,11 +408,27 @@ export class AnthropicModel extends Model<AnthropicModelConfig> {
       thinking = request.thinking
       const requestOptions = this._buildRequestOptions()
       const usage = createEmptyUsage()
+      // Once compaction is possible, history may carry a `compaction` block, which only the
+      // beta endpoint accepts; the non-beta endpoint rejects it outright ("Input tag
+      // 'compaction' ... does not match any of the expected tags"). TS can't resolve the
+      // overloaded `.stream()` signature through a union-typed resource variable, so branch
+      // explicitly instead of picking one `messagesResource` up front.
+      const useBeta = this.requiresServerSideCompaction
+      const betaOptions = useBeta ? { ...(requestOptions ?? {}), betas: [COMPACT_BETA] } : undefined
 
       while (true) {
-        const stream = requestOptions
-          ? this._client.messages.stream(request, requestOptions)
-          : this._client.messages.stream(request)
+        const stream = useBeta
+          ? betaOptions
+            ? this._client.beta.messages.stream(
+                request as unknown as Anthropic.Beta.Messages.MessageCreateParamsStreaming,
+                betaOptions
+              )
+            : this._client.beta.messages.stream(
+                request as unknown as Anthropic.Beta.Messages.MessageCreateParamsStreaming
+              )
+          : requestOptions
+            ? this._client.messages.stream(request, requestOptions)
+            : this._client.messages.stream(request)
 
         let stopReason = 'endTurn'
         let messageStopped = false
@@ -537,7 +573,10 @@ export class AnthropicModel extends Model<AnthropicModelConfig> {
           const pausedMessage = await stream.finalMessage()
           request = {
             ...request,
-            messages: [...request.messages, { role: 'assistant', content: pausedMessage.content }],
+            messages: [
+              ...request.messages,
+              { role: 'assistant', content: pausedMessage.content as unknown as Anthropic.MessageParam['content'] },
+            ],
           }
           logger.debug(`continuation=<${continuations}> | resuming paused server-side tool turn`)
           continue

@@ -45,6 +45,13 @@ export class SummarizeStrategy extends BaseOffloadStrategy {
 
   override async apply(context: ContextState): Promise<boolean> {
     const model = this._resolveModel(context.agent)
+    // Message-level gating (utilization/overflow) happens here, before the server-side branch,
+    // because that branch bypasses super.apply() -- which is the only place this check otherwise
+    // lives. Per-block strategies (no utilization) have no equivalent gate here; their own
+    // threshold check happens per-block, inside _applyPerBlock.
+    if (this._isMessageLevel && !context.overflow && context.utilization < this._utilizationThreshold!) {
+      return false
+    }
     if (this._isRetroactive && model?.requiresServerSideCompaction) {
       return this._applyServerSide(context, model)
     }
@@ -67,9 +74,16 @@ export class SummarizeStrategy extends BaseOffloadStrategy {
    * with — see `team/designs/0022-preserved-thinking-support.md`.
    */
   private async _applyServerSide(context: ContextState, model: Model): Promise<boolean> {
+    const agent = context.agent
+    // The compaction request must carry the same system prompt and tools as the live
+    // conversation -- Anthropic binds a thinking block's signature to the exact prefix (system +
+    // tools + history) that produced it, and rejects a compaction request whose system/tools
+    // differ from what generated the thinking blocks being replayed into it.
     const compacted = await model.compact(context.messages, {
       utilization: context.utilization,
       preservedMessages: this._preserveRecent,
+      ...(agent.systemPrompt !== undefined && { systemPrompt: agent.systemPrompt }),
+      toolSpecs: agent.toolRegistry.list().map((tool) => tool.toolSpec),
     })
     if (!compacted) return false // provider produced no summary, so leave the history unchanged
 

@@ -356,3 +356,38 @@ class TestSummarizeStrategyServerSideCompaction:
         mock_agent.model.compact = unittest.mock.AsyncMock()
         strategy = Offload.summarize("tool_results").when(threshold=10)
         assert strategy._is_retroactive is False
+
+    @pytest.mark.asyncio
+    async def test_does_not_route_to_compact_when_utilization_below_threshold(self, mock_agent):
+        """Regression: the message-level utilization/overflow gate must still apply to the
+        server-side branch -- it must not fire on every apply() call just because the model
+        requires server-side compaction."""
+        mock_agent.model.requires_server_side_compaction = True
+        mock_agent.model.compact = unittest.mock.AsyncMock()
+        strategy = Offload.summarize("*").when(utilization=0.8)
+        messages: Messages = [
+            Message(role="user", content=[ContentBlock(text="old1")]),
+            Message(role="user", content=[ContentBlock(text="recent")]),
+        ]
+        mock_agent.messages = messages
+        context = ContextState(messages=messages, agent=mock_agent, utilization=0.2)
+
+        assert await strategy.apply(context) is False
+        mock_agent.model.compact.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_routes_to_compact_on_overflow_even_below_utilization_threshold(self, mock_agent):
+        mock_agent.model.requires_server_side_compaction = True
+        preserved = Message(role="user", content=[ContentBlock(text="recent")])
+        compaction_message = Message(role="assistant", content=[ContentBlock(compaction={"content": "s"})])
+        mock_agent.model.compact = unittest.mock.AsyncMock(return_value=[compaction_message, preserved])
+        strategy = Offload.summarize("*").when(utilization=0.8)
+        messages: Messages = [
+            Message(role="user", content=[ContentBlock(text="old1")]),
+            preserved,
+        ]
+        mock_agent.messages = messages
+        context = ContextState(messages=messages, agent=mock_agent, utilization=0.2, overflow=True)
+
+        assert await strategy.apply(context) is True
+        mock_agent.model.compact.assert_called_once()
