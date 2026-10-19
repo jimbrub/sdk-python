@@ -67,10 +67,35 @@ class SummarizeStrategy(BaseOffloadStrategy):
 
     async def apply(self, context: ContextState) -> bool:
         """Apply summarization. Returns False if no model is available."""
-        if not self._resolve_model(context.agent):
+        model = self._resolve_model(context.agent)
+        if self._is_retroactive and model is not None and model.requires_server_side_compaction:
+            return await self._apply_server_side(context, model)
+        if not model:
             logger.warning("strategy=<%s> | no model available for summarization", self.name)
             return False
         return await super().apply(context)
+
+    async def _apply_server_side(self, context: ContextState, model: Model) -> bool:
+        """Reduce context through the provider's server-side compaction.
+
+        Routed here instead of the client-side path above whenever the strategy is retroactive
+        (`utilization` is set, or `preserve_recent > 0` on a per-block strategy — see
+        `BaseOffloadStrategy.__init__`) and the resolved model's `requires_server_side_compaction`
+        is `True`: rewriting messages the model already saw a request over would invalidate any
+        preserved-thinking block kept after the edit. `utilization`/`preserved_messages` are passed
+        straight through to `model.compact`, matching the conditions this strategy was configured
+        with — see `team/designs/0022-preserved-thinking-support.md`.
+        """
+        compacted = await model.compact(
+            context.messages,
+            utilization=context.utilization,
+            preserved_messages=self._preserve_recent,
+        )
+        if compacted is None:
+            return False  # provider produced no summary, so leave the history unchanged
+
+        context.messages[:] = compacted  # [compaction message, *preserved messages]
+        return True
 
     async def _apply_per_message(self, context: ContextState) -> bool:
         """Summarize oldest eligible messages into a single summary message."""

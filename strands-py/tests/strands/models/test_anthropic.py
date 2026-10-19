@@ -1714,6 +1714,100 @@ class TestCountTokens:
         assert result >= 0
 
 
+class TestCompact:
+    """Tests for AnthropicModel.compact native server-side compaction."""
+
+    @pytest.fixture
+    def model_with_client(self, anthropic_client, model_id, max_tokens):
+        _ = anthropic_client
+        return AnthropicModel(model_id=model_id, max_tokens=max_tokens)
+
+    @pytest.fixture
+    def messages(self):
+        return [
+            {"role": "user", "content": [{"text": "old1"}]},
+            {"role": "assistant", "content": [{"text": "old2"}]},
+            {"role": "user", "content": [{"text": "recent"}]},
+        ]
+
+    @staticmethod
+    def _compaction_response(content="summary", signature="sig", encrypted_content=None):
+        block = unittest.mock.MagicMock()
+        block.type = "compaction"
+        block.content = content
+        block.signature = signature
+        block.encrypted_content = encrypted_content
+        response = unittest.mock.MagicMock()
+        response.content = [block]
+        return response
+
+    @pytest.mark.asyncio
+    async def test_compacts_older_messages_and_preserves_tail(self, model_with_client, anthropic_client, messages):
+        anthropic_client.beta.messages.create = unittest.mock.AsyncMock(return_value=self._compaction_response())
+
+        result = await model_with_client.compact(messages, preserved_messages=1)
+
+        assert result is not None
+        assert result[0] == {
+            "role": "assistant",
+            "content": [{"compaction": {"content": "summary", "signature": "sig"}}],
+        }
+        assert result[1:] == messages[2:]
+
+    @pytest.mark.asyncio
+    async def test_sends_compaction_param_and_beta_header(self, model_with_client, anthropic_client, messages):
+        anthropic_client.beta.messages.create = unittest.mock.AsyncMock(return_value=self._compaction_response())
+
+        await model_with_client.compact(messages, utilization=0.9, preserved_messages=1)
+
+        call_kwargs = anthropic_client.beta.messages.create.call_args[1]
+        assert call_kwargs["compaction"] == {"type": "summarize"}
+        assert call_kwargs["betas"] == ["compact-2026-09-04"]
+        # Only the older half of the conversation is sent -- the preserved tail is kept client-side.
+        assert len(call_kwargs["messages"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_includes_encrypted_content_when_present(self, model_with_client, anthropic_client, messages):
+        anthropic_client.beta.messages.create = unittest.mock.AsyncMock(
+            return_value=self._compaction_response(encrypted_content="opaque")
+        )
+
+        result = await model_with_client.compact(messages, preserved_messages=1)
+
+        assert result[0]["content"][0]["compaction"]["encryptedContent"] == "opaque"
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_provider_reports_failed_compaction(
+        self, model_with_client, anthropic_client, messages
+    ):
+        anthropic_client.beta.messages.create = unittest.mock.AsyncMock(
+            return_value=self._compaction_response(content=None)
+        )
+
+        result = await model_with_client.compact(messages, preserved_messages=1)
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_nothing_old_enough_to_compact(self, model_with_client, anthropic_client):
+        single_turn = [{"role": "user", "content": [{"text": "hi"}]}]
+
+        result = await model_with_client.compact(single_turn, preserved_messages=1)
+
+        assert result is None
+        anthropic_client.beta.messages.create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_returns_none_on_request_error(self, model_with_client, anthropic_client, messages, caplog):
+        anthropic_client.beta.messages.create = unittest.mock.AsyncMock(side_effect=RuntimeError("boom"))
+
+        with caplog.at_level(logging.WARNING, logger="strands.models.anthropic"):
+            result = await model_with_client.compact(messages, preserved_messages=1)
+
+        assert result is None
+        assert any("native compaction request failed" in record.message for record in caplog.records)
+
+
 @pytest.mark.filterwarnings("ignore:cache_tools is deprecated:DeprecationWarning")
 class TestPromptCaching:
     """Prompt caching via ``cache_config`` / ``cache_tools``.

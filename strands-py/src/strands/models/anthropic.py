@@ -8,6 +8,7 @@ import base64
 import json
 import logging
 import re
+import math
 import warnings
 from collections.abc import AsyncGenerator
 from typing import Any, TypeVar, cast
@@ -28,7 +29,7 @@ from ..types.citations import (
     WebLocation,
     WebLocationDict,
 )
-from ..types.content import ContentBlock, Message, Messages, SystemContentBlock
+from ..types.content import CompactionContentBlock, ContentBlock, Message, Messages, SystemContentBlock
 from ..types.event_loop import Usage
 from ..types.exceptions import ContextWindowOverflowException, ModelThrottledException
 from ..types.streaming import CitationsDelta, StreamEvent
@@ -114,6 +115,36 @@ def _with_native_output(
     schema = anthropic.transform_schema(structured_output_model)
     output_config = {**request.get("output_config", {}), "format": {"type": "json_schema", "schema": schema}}
     return {**request, "tool_choice": {"type": "none"}, "output_config": output_config}
+
+
+# Beta identifier required to send the top-level `compaction` request parameter.
+# https://platform.claude.com/docs/en/build-with-claude/compaction-keep-recent-turns
+_COMPACT_BETA = "compact-2026-09-04"
+
+
+def _compaction_split(messages: Messages, preserved_messages: int | float) -> int:
+    """Pick the index that starts the preserved tail for `AnthropicModel.compact`.
+
+    Mirrors `OffloadConditions.preserve_recent`'s count-or-ratio shape, then nudges the cut point
+    to a user-turn boundary so a `toolUse` is never separated from its `toolResult`, and never cuts
+    before a pinned message.
+    """
+    from ..agent.conversation_manager.compression.pin_message import is_pinned
+
+    if not messages:
+        return 0
+
+    preserve = max(0.0, float(preserved_messages))
+    kept = math.ceil(len(messages) * preserve) if 0 < preserve < 1 else int(preserve)
+    end = max(0, min(len(messages) - kept, len(messages)))
+    end = next((index for index in range(end) if is_pinned(messages, index)), end)
+
+    prompt_indexes = [
+        index
+        for index, message in enumerate(messages)
+        if message["role"] == "user" and not any("toolResult" in block for block in message["content"])
+    ]
+    return max((index for index in prompt_indexes if 0 < index <= end), default=0)
 
 
 class AnthropicModel(Model):
@@ -966,6 +997,96 @@ class AnthropicModel(Model):
                 e,
             )
             return await super().count_tokens(messages, tool_specs, system_prompt, system_prompt_content)
+
+    @override
+    async def compact(
+        self,
+        messages: Messages,
+        *,
+        utilization: float | None = None,
+        preserved_messages: int | float = 0,
+        tool_specs: list[ToolSpec] | None = None,
+        system_prompt: str | None = None,
+    ) -> Messages | None:
+        """Reduce context through Anthropic's server-side compaction, instead of a client-side summary.
+
+        Preserved-thinking models bind each thinking block's signature to the exact history prefix
+        that produced it, so rewriting that prefix client-side (the ``Offload.summarize`` default)
+        invalidates the thinking blocks kept after the edit, and the next request errors. Anthropic's
+        native compaction API summarizes a prefix of the conversation server-side and returns a signed
+        ``compaction`` block that keeps the remaining thinking blocks valid. See
+        ``team/designs/0022-preserved-thinking-support.md``.
+
+        Named and shaped to match ``OffloadConditions`` field-for-field so callers (``SummarizeStrategy``)
+        pass through the same conditions a customer already configured on ``Offload.summarize(...).when(...)``.
+
+        Args:
+            messages: Full conversation history. The cut point between the compacted prefix and the
+                preserved tail is computed here, from ``preserved_messages``.
+            utilization: The context utilization that triggered this call. Accepted for parity with
+                ``OffloadConditions.utilization`` and for logging; the decision to compact at all was
+                already made by the calling strategy, so it is not re-checked here.
+            preserved_messages: How many of the most recent messages to keep verbatim, in the same
+                count-or-ratio shape as ``OffloadConditions.preserve_recent``: an integer (>= 1) keeps
+                that many trailing messages, a float in (0, 1) keeps that ratio. The split additionally
+                never separates a ``toolUse`` from its ``toolResult`` and never cuts before a pinned
+                message, so it may preserve more than requested.
+            tool_specs: Tool specifications to include in the compaction request, so the summary
+                reflects the tools that were available when the compacted messages were produced.
+            system_prompt: Plain string system prompt to include in the compaction request.
+
+        Returns:
+            ``[compaction message, *preserved messages]``, or ``None`` when there was nothing old
+            enough to compact, or the provider reported the compaction attempt failed.
+        """
+        split = _compaction_split(messages, preserved_messages)
+        if split <= 0:
+            logger.debug(
+                "preserved_messages=<%s>, messages=<%d> | nothing old enough to compact natively",
+                preserved_messages,
+                len(messages),
+            )
+            return None
+
+        older, recent = messages[:split], messages[split:]
+        request = self.format_request(older, tool_specs, system_prompt)
+        request.pop("stream", None)
+
+        try:
+            response = await self.client.beta.messages.create(
+                **request,
+                compaction={"type": "summarize"},
+                betas=[_COMPACT_BETA],
+            )
+        except Exception as e:
+            logger.warning(
+                "model_id=<%s>, error=<%s> | native compaction request failed, leaving history unchanged",
+                self.config["model_id"],
+                e,
+            )
+            return None
+
+        block = next((b for b in response.content if getattr(b, "type", None) == "compaction"), None)
+        if block is None or not block.content:
+            logger.debug(
+                "utilization=<%s>, model_id=<%s> | provider produced no summary, leaving history unchanged",
+                utilization,
+                self.config["model_id"],
+            )
+            return None
+
+        compaction_block: CompactionContentBlock = {"content": block.content, "signature": block.signature}
+        if getattr(block, "encrypted_content", None):
+            compaction_block["encryptedContent"] = block.encrypted_content
+
+        summary_message: Message = {"role": "assistant", "content": [{"compaction": compaction_block}]}
+        logger.debug(
+            "model_id=<%s>, compacted=<%d>, preserved=<%d> | native compaction complete",
+            self.config["model_id"],
+            len(older),
+            len(recent),
+        )
+        return [summary_message, *recent]
 
     @override
     async def stream(
