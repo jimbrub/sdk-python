@@ -213,14 +213,14 @@ class AnthropicModel(Model):
         """
         return resolve_config_metadata(self.config, self.config["model_id"])
 
-    def _format_request_message_content(self, content: ContentBlock) -> dict[str, Any]:
+    def _format_request_message_content(self, content: ContentBlock) -> dict[str, Any] | None:
         """Format an Anthropic content block.
 
         Args:
             content: Message content.
 
         Returns:
-            Anthropic formatted content block.
+            Anthropic formatted content block, or None if Anthropic cannot accept the block.
 
         Raises:
             TypeError: If the content block type or document format cannot be converted to an
@@ -270,11 +270,22 @@ class AnthropicModel(Model):
             }
 
         if "reasoningContent" in content:
-            return {
-                "signature": content["reasoningContent"]["reasoningText"]["signature"],
-                "thinking": content["reasoningContent"]["reasoningText"]["text"],
-                "type": "thinking",
-            }
+            reasoning_text = content["reasoningContent"].get("reasoningText", {})
+            if signature := reasoning_text.get("signature"):
+                return {
+                    "signature": signature,
+                    "thinking": reasoning_text.get("text", ""),
+                    "type": "thinking",
+                }
+
+            if redacted_content := content["reasoningContent"].get("redactedContent"):
+                return {
+                    "data": base64.b64encode(redacted_content).decode("utf-8"),
+                    "type": "redacted_thinking",
+                }
+
+            # Anthropic rejects reasoning text without a signature, which is how other model families emit it.
+            return None
 
         if "text" in content:
             return {"text": content["text"], "type": "text"}
@@ -292,15 +303,16 @@ class AnthropicModel(Model):
             }
 
         if "toolResult" in content:
+            formatted_results = [
+                self._format_request_message_content(
+                    {"text": json.dumps(tool_result_content["json"], ensure_ascii=False)}
+                    if "json" in tool_result_content
+                    else cast(ContentBlock, tool_result_content)
+                )
+                for tool_result_content in content["toolResult"]["content"]
+            ]
             return {
-                "content": [
-                    self._format_request_message_content(
-                        {"text": json.dumps(tool_result_content["json"], ensure_ascii=False)}
-                        if "json" in tool_result_content
-                        else cast(ContentBlock, tool_result_content)
-                    )
-                    for tool_result_content in content["toolResult"]["content"]
-                ],
+                "content": [block for block in formatted_results if block is not None],
                 "is_error": content["toolResult"]["status"] == "error",
                 "tool_use_id": content["toolResult"]["toolUseId"],
                 "type": "tool_result",
@@ -327,6 +339,7 @@ class AnthropicModel(Model):
         cache_config = self.config.get("cache_config")
         configured_ttl = cache_config.ttl if cache_config else None
         formatted_messages = []
+        dropped_unsigned_reasoning = False
 
         for message_idx, message in enumerate(messages):
             formatted_contents: list[dict[str, Any]] = []
@@ -355,7 +368,11 @@ class AnthropicModel(Model):
                     logger.warning("Location sources are not supported by Anthropic | skipping content block")
                     continue
 
-                formatted_contents.append(self._format_request_message_content(content))
+                formatted_content = self._format_request_message_content(content)
+                if formatted_content is None:
+                    dropped_unsigned_reasoning = True
+                    continue
+                formatted_contents.append(formatted_content)
 
             # Automatic placement runs once the whole message is formatted, so the cache point lands on a
             # block that survived translation. It is skipped when a caller-placed point already marked one.
@@ -369,6 +386,9 @@ class AnthropicModel(Model):
 
             if formatted_contents:
                 formatted_messages.append({"content": formatted_contents, "role": message["role"]})
+
+        if dropped_unsigned_reasoning:
+            logger.warning("Unsigned reasoning content is not supported by Anthropic | skipped content blocks")
 
         return formatted_messages
 
