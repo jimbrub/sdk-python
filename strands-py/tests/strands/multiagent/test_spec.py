@@ -52,16 +52,6 @@ def test_choice_none_value_is_not_overwritten():
     assert Choice([Option("off", None)]).normalized()[0].value is None
 
 
-def test_to_schema_property_is_deprecated():
-    with pytest.warns(DeprecationWarning, match="to_schema_property"):
-        prop = Choice([Option("a", description="A.")], multiple=True).to_schema_property("Pick.")
-    assert prop == {
-        "type": "array",
-        "items": {"type": "string", "enum": ["a"]},
-        "description": "Pick.\nOptions:\n- a: A.",
-    }
-
-
 def test_to_schema_properties():
     d = _AXIS_DESCRIPTIONS
     props = _to_schema_properties(

@@ -13,7 +13,6 @@ the parameters the model sees and govern what values it can supply:
 from __future__ import annotations
 
 import logging
-import warnings
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -89,33 +88,6 @@ class Choice:
                 name = str(entry)
                 result.append(Option(name, name))
         return result
-
-    def to_schema_property(self, description: str = "") -> dict[str, Any]:
-        """Render this axis as a JSON Schema property for a tool's ``inputSchema``.
-
-        .. deprecated::
-            Will be removed in a future release; there is no public replacement.
-        """
-        warnings.warn(
-            "Choice.to_schema_property is deprecated and will be removed in a future release.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        options = self.normalized()
-        values = [option.name for option in options]
-        lines = [f"- {option.name}: {option.description}" for option in options if option.description]
-        desc = description
-        if lines:
-            block = "Options:\n" + "\n".join(lines)
-            desc = f"{description}\n{block}" if description else block
-        prop: dict[str, Any] = (
-            {"type": "array", "items": {"type": "string", "enum": values}}
-            if self.multiple
-            else {"type": "string", "enum": values}
-        )
-        if desc:
-            prop["description"] = desc
-        return prop
 
     def value_for(self, name: str) -> Any:
         """The resolved value behind ``name``, or ``name`` itself if unknown."""
