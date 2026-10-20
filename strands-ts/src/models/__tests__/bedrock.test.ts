@@ -4125,6 +4125,39 @@ describe('BedrockModel', () => {
         })
       )
     })
+
+    it('omits an empty source when replaying a citation', async () => {
+      const provider = new BedrockModel()
+      const messages = [
+        new Message({
+          role: 'assistant',
+          content: [
+            new CitationsBlock({
+              citations: [
+                {
+                  location: { type: 'documentPage' as const, documentIndex: 0, start: 1, end: 2 },
+                  source: '',
+                  sourceContent: [{ text: 'page source' }],
+                  title: 'letter',
+                },
+              ],
+              content: [{ text: 'summary' }],
+            }),
+          ],
+        }),
+        new Message({ role: 'user', content: [new TextBlock('Follow up')] }),
+      ]
+
+      collectIterator(provider.stream(messages))
+
+      const request = mockConverseStreamCommand.mock.lastCall![0]
+      const replayed = request.messages![0]!.content![0]!.citationsContent!.citations![0]!
+      expect(replayed).toStrictEqual({
+        location: { documentPage: { documentIndex: 0, start: 1, end: 2 } },
+        sourceContent: [{ text: 'page source' }],
+        title: 'letter',
+      })
+    })
   })
 
   describe('media blocks in tool results', () => {

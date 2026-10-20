@@ -2072,7 +2072,9 @@ export class BedrockModel extends Model<BedrockModelConfig> {
     return {
       location: this._mapCitationLocationToBedrock(citation.location),
       sourceContent: citation.sourceContent.map((sc) => ({ text: sc.text })),
-      source: citation.source,
+      // An empty source marks one Bedrock never returned (e.g. document citations), and Bedrock
+      // rejects `source` on those locations while requiring it on search-result locations.
+      ...(citation.source && { source: citation.source }),
       title: citation.title,
     }
   }
