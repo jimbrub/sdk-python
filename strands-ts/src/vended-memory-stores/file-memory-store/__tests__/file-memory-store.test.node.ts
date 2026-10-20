@@ -472,6 +472,9 @@ describe('FileMemoryStore', () => {
           done: true,
           value: { message: { content: [{ text: '[]' }] }, stopReason: 'end_turn', metadata: {} },
         }),
+        [Symbol.asyncIterator]() {
+          return this
+        },
       }),
     })
 
@@ -494,6 +497,9 @@ describe('FileMemoryStore', () => {
               metadata: {},
             },
           }),
+          [Symbol.asyncIterator]() {
+            return this
+          },
         }),
       }
 
@@ -525,6 +531,9 @@ describe('FileMemoryStore', () => {
               metadata: {},
             },
           }),
+          [Symbol.asyncIterator]() {
+            return this
+          },
         }),
       }
 
