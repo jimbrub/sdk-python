@@ -236,26 +236,13 @@ The two ways to run Claude on Bedrock behave differently:
 - **`AnthropicModel` with a Bedrock client** is supported. Native compaction worked through `AsyncAnthropicBedrock` (Bedrock's InvokeModel endpoint) in all 36 native runs of the eval in "Server-Side Compaction Performance with Different `aux_model`". Anthropic's documentation doesn't list Bedrock for on-demand compaction, so it isn't confirmed that this support is intended or stable. In TypeScript the Bedrock client is passed as `client`. In Python, `AnthropicModel` only builds an `AsyncAnthropic` client from `client_args`, so a Bedrock client has to be assigned to `model.client` after construction. A first-class way to pass it is a candidate follow-up.
 - **`BedrockModel` (Converse API)** is not supported. Converse has no `compaction` parameter or content block, so `BedrockModel` doesn't override `compact()`, and the TypeScript `BedrockModel` rejects a `CompactionBlock`. `BedrockModel` still accepts `requires_server_side_compaction`. With the flag set, `compact()` raises, the context manager logs the strategy failure and continues, and the history isn't reduced. Rejecting the flag at config time on providers that don't implement `compact()` would surface this earlier. `BedrockModel` customers can use the client-side options in "Client-side summarization that stays valid on preserved-thinking models".
 
-### Summarize
+### Summarize Server Side through Compaction
 
 Anthropic's answer to vended context modification is compaction. The public surface, `Offload.summarize(target).when({ utilization, preserveRecent })`, does not change. Behind it, `apply()` resolves the model as it does today (`this._config.model ?? agent.auxModel`). If `_isRetroactive` is set and that model's `requiresServerSideCompaction` is `true`, `SummarizeStrategy` calls `model.compact(...)` instead of generating a client-side summary. A customer who set `agent.auxModel` is still routed there, and `agent.model` is never read directly. `compact()` takes the customer's existing conditions as-is, so there is no second API to learn.
 
 If the strategy was configured with a custom `systemPrompt`, `compact()` sends it as the compaction request's `instructions`. It can't replace the request's `system`, which must match the live conversation for the thinking blocks to stay valid.
 
 Anthropic rejects a compaction request whose system prompt or tools differ from the live conversation.
-
-### Modifying Tool Lists
-
-Tool lists are tied. 
-
-TODO
-
-
-### System Prompt
-
-System prompts are tied. How do we modify these? 
-
-TODO
 
 #### Implementation: Part 1 
 
@@ -324,19 +311,64 @@ Where is the "path" checked in the codebase for summarize to function normally t
 
 ### Implementation: Part 2
 
-#### Tools lists
+Part 2 will focus on implementing some of the server-side context management techniques that Anthropic allows through their API. Part 1 moves summarization to its server-side form. Part 2 does the same for the other Strands techniques that edit history the model has already seen. Each of them invalidates every later thinking block when done client-side, and each has an append-only or server-side form on preserved-thinking models.
 
-TODO
+| Strands technique today | Server-side form | Beta |
+|---|---|---|
+| Retroactive tool-result truncate or drop, and the agentic `truncate_context` tool | `clear_tool_uses_20250919` context edit | `context-management-2025-06-27` |
+| None (offload strategies skip `ReasoningBlock`) | `clear_thinking_20251015` context edit | `context-management-2025-06-27` |
+| Changing `agent.systemPrompt` mid-session | Mid-conversation `role: "system"` message | None (`clear_at` reminders: `mid-conversation-system-clear-at-2026-08-21`) |
+| Adding or removing tools mid-session | `tool_addition` / `tool_removal` blocks in a `role: "system"` message | `mid-conversation-tool-changes-2026-07-01` |
 
-#### System prompts
+#### Clearing Tool Uses
 
-TODO
+Anthropic's [context editing](https://platform.claude.com/docs/en/build-with-claude/context-editing) clears old tool results on the server with the `clear_tool_uses_20250919` edit. The API applies the edit to the request only, and Strands keeps the full history, so nothing the model has already seen is rewritten. Anthropic's docs state that server-side context management doesn't invalidate thinking blocks on Claude Fable 5.1, Opus 5.5, Sonnet 5.5, and Haiku 5.5. Context editing is available on every platform, Bedrock included.
+
+It would replace the retroactive tool-result strategies: `Offload.truncate` and `Offload.drop` with `preserveRecent > 0` or a `utilization` condition, and the agentic `truncate_context` tool. The strategy conditions map onto the edit's settings:
+
+| Strands | `clear_tool_uses_20250919` |
+|---|---|
+| `utilization` | `trigger: { type: "input_tokens", value: utilization × contextWindowLimit }` (default 100,000) |
+| `preserveRecent` | `keep: { type: "tool_uses", value: N }` (default 3) |
+| Tool exclusion filter | `exclude_tools` |
+| Target includes tool inputs | `clear_tool_inputs: true` |
+| None | `clear_at_least: { type: "input_tokens", value: N }`, so each clear frees enough to pay for the prompt-cache rewrite |
+
+Unlike compaction, this is a per-request setting, not a history change. The strategy doesn't edit `messages`. It adds an entry to the request's `context_management.edits`, and `AnthropicModel` sends it on every request. That needs a hook next to `compact()`, for example a model method that takes the active edits, or edits carried on `ContextState`.
+
+Gaps:
+
+- Strands' tool include filter has no API equivalent. `exclude_tools` is an exclusion list only, so an include filter would have to be inverted against the tool registry.
+- The server's placeholder text can't carry Strands' stash references, so the retrieval tool can't point back to cleared content.
+- `context_management` can't be sent on an on-demand compaction request, so `compact()` must leave it off.
+
+The response reports what the server cleared in `context_management.applied_edits` (`cleared_tool_uses`, `cleared_input_tokens`), which Strands should log next to the `input_transformations` drops Part 1 already reports.
+
+#### Clearing Thinking
+
+The `clear_thinking_20251015` edit clears thinking blocks from older assistant turns on the server. Strands has no thinking-reduction strategy today; offload strategies skip `ReasoningBlock` on purpose. This edit would let customers trim old reasoning tokens without invalidating anything.
+
+It has one setting, `keep: { type: "thinking_turns", value: N }` or `"all"`. On the 5.5 models the default is `"all"`, so a strategy has to set `keep` explicitly to clear anything. Clearing invalidates the prompt cache from the clear point onward, so `keep` trades context space against cache hits. When both edits are sent, `clear_thinking_20251015` must come first in `edits`. Cleared turns are reported in `context_management.applied_edits` (`cleared_thinking_turns`, `cleared_input_tokens`), the same as tool-use clearing.
+
+#### System Prompt Changes
+
+Changing `agent.systemPrompt` mid-session edits the top-level `system` field, which every thinking block is bound to, so all earlier thinking is invalidated. The append-only form is a [mid-conversation system message](https://platform.claude.com/docs/en/build-with-claude/mid-conversation-system-messages): append a `{ "role": "system", ... }` message instead of editing `system`. It needs no beta and works on Bedrock through InvokeModel.
+
+For per-turn reminders, which is the context injector question in Open Questions, a system message with `clear_at: "next_user_message"` (beta `mid-conversation-system-clear-at-2026-08-21`) is shown for one turn and then stays in the history cleared. Deleting an earlier reminder would invalidate later thinking.
+
+#### Tool List Changes
+
+Adding or removing a tool, or regenerating a tool's description or schema (a date, a version), changes `tools` and invalidates every earlier thinking block. The API reports it as `tool_schema_changed`. This happens most often when an MCP server connects partway through a session. The append-only form is a `role: "system"` message that carries `tool_addition` or `tool_removal` blocks (beta `mid-conversation-tool-changes-2026-07-01`).
+
+Suggested order: tool-use clearing first, since it replaces something Strands does today and is the most common way customers hit the 400; then system prompt and tool list changes, which are append-only rewrites of paths that break today; then thinking clearing, which is a new, optional capability.
+
 
 ### Implementation: Part 3
 
 Server-side summarization through compaction blocks with additional model providers. 
 
 OpenAI compaction block implementation
+
 
 ## Developer Experience
 
@@ -374,31 +406,28 @@ Without the flag, the same agent runs a client-side summary and the next request
 
 ## Open Questions
 
--[x] How can we align Anthropic compact API with our API's — resolved for Part 1: `AnthropicModel.compact(messages, { utilization, preservedMessages })` mirrors `OffloadConditions` field-for-field (see Approach 1 above), so `Offload.summarize(...).when(...)` is the only API customers need to learn.
+- [ ] **What should `compact()` do when the summarizer calls a tool?** The compaction request carries the live tool list, so the model can call a tool instead of summarizing. The API then returns `stop_reason: "tool_use"` with no summary, and `compact()` leaves the history unchanged. Options: add a default "Do not call tools" instruction when the customer sets no `instructions` (this replaces Anthropic's default summarization prompt entirely), send `tool_choice: {"type": "none"}` (not yet confirmed to be accepted on compaction requests), or retry once with that instruction.
 
--[] Summarize between each thinking block
+- [ ] **Pinned messages ahead of the cut.** The compaction block has to open the history, so a pinned message can't be kept verbatim ahead of it. When a pin sits before every possible cut point (for example a pinned first task message), `compact()` skips compaction and logs a warning, and the context keeps growing. Options: fold the pinned content into `instructions` so the summary retains it, fall back to client-side summarization for that call, or document pins as incompatible with native compaction.
 
--[] How will context injector be utilized? 
+- [ ] **What if the `aux_model` can't compact the history?** Opus 5.5 compacting through Haiku 5.5 worked in 18 of 18 runs (see "Server-Side Compaction Performance with Different `aux_model`"), but other model pairs are untested. Today a rejected compaction leaves the history unchanged and logs a warning. Options: keep that behavior, fall back to `agent.model` with a warning, or fail fast at configuration time.
 
--[] Will there need to be different compaction blocks for different providers? 
+- [ ] **One capability switch for Part 2.** `requiresServerSideCompaction` only describes compaction. Should it become a broader capability, for example one per technique, once Part 2 adds tool-use clearing, thinking clearing, and system prompt and tool list changes? Strategies would then ask the model what it supports instead of checking an Anthropic-specific flag.
 
--[] So we can edit the history that is not associated with a thinking block? 
-  -[] Should there be protected_history? History/prefixes that are associated with a thinking block? 
+- [ ] **Can client-side strategies edit content after the most recent thinking block?** Each thinking block is only checked against what comes before it, so content after the last replayed thinking block can change without invalidating anything. Should strategies restrict client-side edits to that region (see "Alternative: Categorizing Prefixes as Protected")?
 
+- [ ] **How should the context injector add per-turn content on preserved-thinking models?** Part 2 proposes system messages with `clear_at: "next_user_message"`. Confirm that fits the injector before it's built.
 
--[] What about users that use Anthropic through bedrock and do not have an Anthropic API key? Will they fail silently, or do we need a new error? See "Anthropic models on Bedrock": `AnthropicModel` with a Bedrock client works, and `BedrockModel` fails without reducing the history.
+- [ ] **Is `CompactionBlock` provider-neutral?** Part 3 adds OpenAI compaction. Decide whether one block type can carry both providers' compaction output or each provider needs its own.
 
--[] **Model resolution for server-side compaction must go through `agent.auxModel`, not `agent.model`, directly** — fixed in Approach 1 above (`apply()` now resolves once via `this._config.model ?? agent.auxModel` and reuses that same model for both the gating check and the `compact()` call, matching `agent.auxModel`'s [existing fallback to `agent.model`](https://github.com/strands-agents/harness-sdk/blob/1adcaf9fbf5f7709d25e5eb061e368527b48bb4c/strands-py/src/strands/agent/agent.py#L733) when the customer never set one). Still open: **what happens when `agent.aux_model` is explicitly set to a *different* model than the one that actually produced the conversation's thinking blocks?** Preserved-thinking signatures are cryptographically bound to the exact model + prefix (system prompt, tools, history) that generated them — compacting through a different model may not be able to validate those signatures at all, independent of whether the resolution logic is correct. Options to decide: (a) call `compact()` on the resolved model anyway and let the provider reject it, surfacing whatever error it returns; (b) detect the mismatch and fall back to `agent.model` with a warning; (c) treat it as a configuration error and fail fast before making the request. None of these is implemented yet — Part 1 only fixes *which* model gets resolved, not what to do when the resolved model can't be the one validating the signature.
+- [ ] **Should summaries be incremental?** On-demand compaction can compact a history that already starts with a compaction block, summarizing the old summary plus newer turns. Should Strands compact more often in smaller steps to keep more detail, rather than once at the utilization threshold?
 
--[] What happens when `agent.aux_model` differs from the model that is generating the existing thinking blocks? Measured for Opus 5.5 → Haiku 5.5 on Bedrock: Haiku compacted the history in 18 of 18 runs and the kept thinking stayed valid (see "Server-Side Compaction Performance with Different `aux_model`" below). Other model pairs are untested.
+### Resolved
 
--[] Should summarization happen between individual thinking blocks? (could we have another level of depth in the summaries with this?)
-
--[] How do we ensure that when we make a compaction request, that the system prompt and tools do not differ from the live conversation? How does compaction know when they differ from the live conversation? 
-
--[] The compaction request carries the live tool list, so the model may call a tool instead of summarizing. Should `AnthropicModel.compact()` append "Do not call tools." to `instructions` (as cloudflare-os does), send `tool_choice: {"type": "none"}`, or both? Anthropic's preserved-thinking docs say to use `tool_choice: none` rather than removing tools. It isn't part of the checked prefix, but it hasn't been confirmed that compaction requests accept it.
-
--[] **Pinned messages ahead of the cut.** The compaction block has to open the history, and the kept turns must follow it exactly as they were, so a pinned message can't be kept verbatim ahead of the block. When a pin sits before every possible cut point (for example a pinned first task message), `compact()` skips compaction and logs a warning, and the context keeps growing. Options: fold the pinned content into the compaction `instructions` so the summary retains it, fall back to client-side summarization for that call, or document pins as incompatible with native compaction.
+- [x] **Aligning `compact()` with Strands' API.** `compact()` takes the strategy's conditions (`utilization`, `preservedMessages`) plus the live `systemPrompt` and `toolSpecs` and the strategy's `instructions`, so `Offload.summarize(...).when(...)` is the only API customers learn. See Approach 1.
+- [x] **Model resolution.** The strategy resolves the model once (`this._config.model ?? agent.auxModel`) and uses it for both the capability check and the `compact()` call. It never reads `agent.model` directly.
+- [x] **Keeping the compaction request's system prompt and tools in sync.** `compact()` sends the agent's current system prompt and tool specs, so the request matches the conversation unless they changed mid-session. Part 2 covers mid-session changes.
+- [x] **Anthropic on Bedrock.** `AnthropicModel` with a Bedrock client works; `BedrockModel` (Converse) doesn't support compaction. See "Anthropic models on Bedrock".
 
 ## Alternative: Recompute `_isRetroactive` via a getter
 
@@ -423,39 +452,6 @@ Anthropic does not recommend
 
 
 ## Additional Details
-
-
-<details>
-<summary>Where does Strands summarize things in the SDK code?</summary>
-
-There is three places where the Strands SDK implements some kind of summarization technique which alters conversation history and will error out on Anthropic's Preserved Thinking models: 
-
-#: 1
-Entry point: SummarizingConversationManager.reduce()
-Shared helper it calls: generateSummary / generate_summary
-TS: conversation-manager/summarizing-conversation-manager.ts (SummarizingConversationManager.reduce)
-Python: agent/conversation_manager/summarizing_conversation_manager.py (SummarizingConversationManager._generate_summary)
-────────────────────────────────────────
-#: 2
-Entry point: summarize_context tool (agentic context mode)
-Shared helper it calls: generateSummary / generate_summary, called with
-agent.auxModel
-TS: context-manager/modes/agentic/agentic-context.ts (summarizeContext)
-Python: _context_manager/modes/agentic/agentic_context.py (summarize_context)
-────────────────────────────────────────
-#: 3
-Entry point: Offload.summarize(...) → SummarizeStrategy; the
-proactiveSummarization preset uses it
-Shared helper it calls: summarizeContent / _summarize_content
-TS: context-manager/strategies/offload/summarize.ts (SummarizeStrategy.apply)
-Python: _context_manager/strategies/offload/summarize.py (SummarizeStrategy.apply)
-
-Note: function/method names above are more durable than line numbers, which drift as the
-files change. Verify against the current `main` branch rather than trusting this appendix
-to stay perfectly in sync.
-
-</details>
-
 
 <details>
 <summary>Client-side summarization that stays valid on preserved-thinking models</summary>
@@ -514,101 +510,6 @@ Suggestions for `Model.compact()` based on how they do it:
 
 
 <details>
-<summary>SimpleAgent code for testing</summary>
-
-```python
-"""Minimal Strands agent with one custom tool."""
-
-import logging
-
-from rich import pretty
-
-from strands import Agent, tool
-from strands.models import BedrockModel
-
-pretty.install()
-
-logging.basicConfig(format="%(levelname)s | %(name)s | %(message)s", level=logging.WARNING)
-# Strands internals: model request/response handling, tool execution, event loop.
-logging.getLogger("strands").setLevel(logging.DEBUG)
-# botocore.endpoint logs the full request body sent to Bedrock; the rest of botocore is mostly noise.
-logging.getLogger("botocore.endpoint").setLevel(logging.INFO)
-
-
-@tool
-def word_count(text: str) -> int:
-    """Count the number of words in a piece of text.
-
-    Args:
-        text: The text to count words in.
-    """
-    return len(text.split())
-
-
-model = BedrockModel(
-    model_id="global.anthropic.claude-sonnet-4-6",
-    region_name="us-west-2",
-)
-
-
-# model = BedrockModel(
-#     model_id="global.anthropic.claude-opus-5-5",
-#     region_name="us-west-2",
-#     max_tokens=8000,
-#     additional_request_fields={"thinking": {"type": "adaptive"}},
-# )
-
-agent = Agent(
-    model=model,
-    system_prompt="You are a concise, helpful assistant.",
-    tools=[word_count],
-    callback_handler=None,
-)
-
-if __name__ == "__main__":
-    # result = agent("How many words are in 'the quick brown fox jumps over the lazy dog'?")
-    # print("\n\nstop_reason:", result.stop_reason)
-    pass
-
-```
-
-</details>
-
-<details>
-<summary>Calling Compaction Over Anthropic's API</summary>
-
-This coding example calls summarize, but sends it over the Claude's Native API compact.
-
-Simple agent code with a hook to log context window capacity: 
-
-```python
-
-
-
-```
-
-Getting Summarizer to trigger from utilization
-
-```python
-
-
-
-agent("Suppose you’re on a game show, and you’re given the choice of three doors: Behind one door is a gold bar; behind the others, rotten vegetables. You pick a door, say No.1, and the host asks you “Do you want to pick door No.2 instead?” Is it to your advantage to switch your choice?")
-
-
-agent("Which weighs more, a pound of water, two pounds of bricks, a pound of feathers, or three pounds of air")
-
-agent("Sally (a girl) has 3 brothers. Each brother has 2 sisters. How many sisters does Sally have?")
-
-agent("Write me a sentence without any words that appear in The Bible.")
-
-
-```
-
-</details>
-
-
-<details>
 <summary>Anthropic code changes in appendix for API implementation</summary>
 
 When the signature does not match the prefix of a thinking block Anthropic responds to the request with this with the following error: 
@@ -622,16 +523,153 @@ What does Anthropic check exactly?
 The following is Anthropic's example for how compaction can be called with preserving recent messages: 
 https://platform.claude.com/docs/en/build-with-claude/compaction-keep-recent-turns
 
-TODO: The following is the code added to anthopic's model code in the SDK to implement the compact function. 
+The following is how `AnthropicModel` calls compaction through the API in the TypeScript SDK ([PR #5287](https://github.com/strands-agents/harness-sdk/pull/5287), `strands-ts/src/models/anthropic.ts`). `compact()` picks the cut point, sends the older messages to `beta.messages.create` with the live system prompt and tools plus `compaction: { type: 'summarize' }`, and returns `[compaction message, ...preserved messages]`. Once `requiresServerSideCompaction` is set, `stream()` and `countTokens()` also go through `beta.messages` with the compaction beta, because the non-beta endpoint rejects a `compaction` content block. The Python version in `strands-py/src/strands/models/anthropic.py` has the same shape. Doc comments are abridged.
+
+```typescript
+// strands-ts/src/models/anthropic.ts (excerpt)
+
+// Beta identifier required to send the top-level `compaction` request parameter.
+// https://platform.claude.com/docs/en/build-with-claude/compaction-keep-recent-turns
+const COMPACT_BETA = 'compact-2026-09-04'
+
+/**
+ * Picks the index that starts the preserved tail for `AnthropicModel.compact`.
+ *
+ * Mirrors `OffloadConditions.preserveRecent`'s count-or-ratio shape, then nudges the cut point to
+ * a user-turn boundary so a `toolUse` is never separated from its `toolResult`, and never cuts
+ * before a pinned message. Returns 0 when the only message before the cut is a prior compaction,
+ * since compacting it alone would not reduce the context.
+ */
+function compactionSplitIndex(messages: Message[], preservedMessages: number): number {
+  if (messages.length === 0) return 0
+
+  const preserve = Math.max(0, preservedMessages)
+  const kept = preserve > 0 && preserve < 1 ? Math.ceil(messages.length * preserve) : Math.trunc(preserve)
+  const cut = Math.max(0, Math.min(messages.length - kept, messages.length))
+  let end = cut
+  for (let index = 0; index < cut; index++) {
+    if (isPinned(messages, index)) {
+      end = index
+      break
+    }
+  }
+
+  const promptIndexes: number[] = []
+  for (let index = 0; index < messages.length; index++) {
+    const message = messages[index]
+    if (message?.role === 'user' && !message.content.some((block) => block.type === 'toolResultBlock')) {
+      promptIndexes.push(index)
+    }
+  }
+
+  let split = 0
+  for (const index of promptIndexes) {
+    if (index > 0 && index <= end) split = index
+  }
+  if (split === 0 && promptIndexes.some((index) => index > 0 && index <= cut)) {
+    // The compaction block must open the history, so nothing can be kept verbatim ahead of it.
+    logger.warn(`pinned_index=<${end}> | pinned message precedes every cut point, skipping native compaction`)
+  }
+  if (split === 1 && messages[0]!.content.every((block) => block.type === 'compactionBlock')) return 0
+  return split
+}
+
+export class AnthropicModel extends Model<AnthropicModelConfig> {
+  // ...existing fields and methods
+
+  /** Reduces context through Anthropic's server-side compaction, instead of a client-side summary. */
+  override async compact(
+    messages: Message[],
+    conditions: {
+      utilization?: number
+      preservedMessages?: number
+      systemPrompt?: SystemPrompt
+      toolSpecs?: ToolSpec[]
+      instructions?: string
+    } = {}
+  ): Promise<Message[] | undefined> {
+    const { utilization, preservedMessages = 0, systemPrompt, toolSpecs, instructions } = conditions
+    const split = compactionSplitIndex(messages, preservedMessages)
+    if (split <= 0) {
+      logger.debug(
+        `preserved_messages=<${preservedMessages}>, messages=<${messages.length}> | nothing old enough to compact natively`
+      )
+      return undefined
+    }
+
+    const older = messages.slice(0, split)
+    const recent = messages.slice(split)
+    // The request must carry the same system prompt and tools as the live conversation --
+    // Anthropic binds a thinking block's signature to the exact prefix (system + tools + history)
+    // that produced it, and rejects a compaction request whose system/tools differ from what
+    // generated the thinking blocks being replayed into it.
+    const request = this._formatRequest(older, {
+      ...(systemPrompt !== undefined && { systemPrompt }),
+      ...(toolSpecs !== undefined && { toolSpecs }),
+    })
+    delete (request as { stream?: boolean }).stream
+
+    const compactionRequest = {
+      ...request,
+      compaction: { type: 'summarize', ...(instructions && { instructions }) },
+      betas: this._compactionBetas(),
+    }
+    logger.debug(`request=<${JSON.stringify(compactionRequest)}> | native compaction request`)
+
+    let response: Anthropic.Beta.Messages.BetaMessage
+    try {
+      response = await this._client.beta.messages.create(
+        compactionRequest as unknown as Anthropic.Beta.Messages.MessageCreateParamsNonStreaming
+      )
+    } catch (error) {
+      logger.warn(`model_id=<${this._config.modelId}>, error=<${error}> | native compaction request failed`)
+      return undefined
+    }
+
+    const block = (
+      response.content as Array<{ type: string; content?: string; signature?: string; encrypted_content?: string }>
+    ).find((candidate) => candidate.type === 'compaction')
+    if (!block || !block.content) {
+      logger.debug(
+        `utilization=<${utilization}>, model_id=<${this._config.modelId}> | provider produced no summary, leaving history unchanged`
+      )
+      return undefined
+    }
+
+    const summaryMessage = new Message({
+      role: 'assistant',
+      content: [
+        new CompactionBlock({
+          content: block.content,
+          ...(block.signature !== undefined && { signature: block.signature }),
+          ...(block.encrypted_content !== undefined && { encryptedContent: block.encrypted_content }),
+        }),
+      ],
+    })
+
+    logger.debug(
+      `model_id=<${this._config.modelId}>, compacted=<${older.length}>, preserved=<${recent.length}> | native compaction complete`
+    )
+    return [summaryMessage, ...recent]
+  }
+
+  /**
+   * Betas for a beta-endpoint request: the compaction beta plus any configured ones.
+   *
+   * The SDK turns the body's `betas` into an `anthropic-beta` header that replaces the client's,
+   * so configured, client, and thinking-binding betas all go in the body.
+   */
+  private _compactionBetas(): string[] {
+    const betas = new Set([COMPACT_BETA, ...(this._config.betas ?? []), ...this._clientBetas])
+    if (this._dropsStaleThinking()) betas.add(THINKING_BINDING_BETA)
+    return [...betas]
+  }
+}
+```
 
 
 
 </details>
-
-</details>
-
-
-
 
 
 <details>
