@@ -90,7 +90,7 @@ class SummarizeStrategy(BaseOffloadStrategy):
         is `True`: rewriting messages the model already saw a request over would invalidate any
         preserved-thinking block kept after the edit. `utilization`/`preserved_messages` are passed
         straight through to `model.compact`, matching the conditions this strategy was configured
-        with — see `team/designs/0022-preserved-thinking-support.md`.
+        with — see `team/designs/0022-server-side-compaction-support.md`.
         """
         # The compaction request must carry the same system prompt and tools as the live
         # conversation -- Anthropic binds a thinking block's signature to the exact prefix

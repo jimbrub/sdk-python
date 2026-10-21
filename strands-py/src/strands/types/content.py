@@ -81,7 +81,7 @@ class CompactionContentBlock(TypedDict, total=False):
     """A provider-generated summary that replaces a prefix of the conversation.
 
     Produced by ``Model.compact`` (currently only ``AnthropicModel``, see
-    ``team/designs/0022-preserved-thinking-support.md``) for providers whose preserved-thinking
+    ``team/designs/0022-server-side-compaction-support.md``) for providers whose preserved-thinking
     blocks are bound to the exact history prefix that produced them, so a client-side summary
     would invalidate any thinking block kept after it. Strands never edits a block of this type;
     it is always round-tripped verbatim between a `Model.compact` response and the next request.

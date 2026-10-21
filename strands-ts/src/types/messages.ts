@@ -574,7 +574,7 @@ export class ReasoningBlock
 /**
  * Data for a compaction block: a provider-generated summary that replaces a prefix of the
  * conversation. Produced by `Model.compact` (currently only `AnthropicModel`, see
- * `team/designs/0022-preserved-thinking-support.md`) for providers whose preserved-thinking blocks
+ * `team/designs/0022-server-side-compaction-support.md`) for providers whose preserved-thinking blocks
  * are bound to the exact history prefix that produced them, so a client-side summary would
  * invalidate any thinking block kept after it. Always round-tripped verbatim — Strands never edits
  * a CompactionBlock it didn't just receive from `Model.compact`.

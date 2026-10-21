@@ -306,7 +306,7 @@ export class AnthropicModel extends Model<AnthropicModelConfig> {
    * invalidates the thinking blocks kept after the edit, and the next request errors. Anthropic's
    * native compaction API summarizes a prefix of the conversation server-side and returns a signed
    * `compaction` block that keeps the remaining thinking blocks valid. See
-   * `team/designs/0022-preserved-thinking-support.md`.
+   * `team/designs/0022-server-side-compaction-support.md`.
    *
    * Named and shaped to match `OffloadConditions` field-for-field so callers (`SummarizeStrategy`)
    * pass through the same conditions a customer already configured on `Offload.summarize(...).when(...)`.

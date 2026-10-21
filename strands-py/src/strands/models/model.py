@@ -242,7 +242,7 @@ class Model(abc.ABC):
         """Reduce context through the provider's server-side compaction.
 
         Only implemented by providers whose `requires_server_side_compaction` is `True` —
-        `AnthropicModel` is the only one today, see `team/designs/0022-preserved-thinking-support.md`.
+        `AnthropicModel` is the only one today, see `team/designs/0022-server-side-compaction-support.md`.
         Named and shaped to match `OffloadConditions` field-for-field, so a strategy that already
         resolved `utilization`/`preserve_recent` from its own conditions can pass them straight
         through unchanged.

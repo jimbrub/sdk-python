@@ -71,7 +71,7 @@ export class SummarizeStrategy extends BaseOffloadStrategy {
    * is `true`: rewriting messages the model already saw a request over would invalidate any
    * preserved-thinking block kept after the edit. `utilization`/`preservedMessages` are passed
    * straight through to `model.compact`, matching the conditions this strategy was configured
-   * with — see `team/designs/0022-preserved-thinking-support.md`.
+   * with — see `team/designs/0022-server-side-compaction-support.md`.
    */
   private async _applyServerSide(context: ContextState, model: Model): Promise<boolean> {
     const agent = context.agent

@@ -371,7 +371,7 @@ export abstract class Model<T extends BaseModelConfig = BaseModelConfig> {
    * Reduces context through the provider's server-side compaction.
    *
    * Only implemented by providers whose `requiresServerSideCompaction` is `true` —
-   * `AnthropicModel` is the only one today, see `team/designs/0022-preserved-thinking-support.md`.
+   * `AnthropicModel` is the only one today, see `team/designs/0022-server-side-compaction-support.md`.
    * Named and shaped to match `OffloadConditions` field-for-field, so a strategy that already
    * resolved `utilization`/`preserveRecent` from its own conditions can pass them straight
    * through unchanged.
