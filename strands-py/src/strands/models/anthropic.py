@@ -91,6 +91,19 @@ _ANTHROPIC_CACHE_TYPE = "ephemeral"
 # The anthropic SDK added the output_config request parameter in 0.77.0, after transform_schema (0.75.0).
 _SDK_SUPPORTS_NATIVE_OUTPUT = tuple(int(part) for part in re.findall(r"\d+", anthropic.__version__)[:2]) >= (0, 77)
 
+# The anthropic SDK added the beta `compaction` request parameter in 1.6.0.
+_SDK_SUPPORTS_COMPACTION = tuple(int(part) for part in re.findall(r"\d+", anthropic.__version__)[:2]) >= (1, 6)
+
+
+def _warn_if_compaction_unsupported(model_config: dict[str, Any], *, stacklevel: int) -> None:
+    """Warn when server-side compaction is enabled on an anthropic SDK that cannot send the request."""
+    if model_config.get("requires_server_side_compaction") and not _SDK_SUPPORTS_COMPACTION:
+        warnings.warn(
+            f"requires_server_side_compaction needs anthropic>=1.6.0 (installed: {anthropic.__version__}); "
+            "native compaction requests will fail and leave the history unchanged",
+            stacklevel=stacklevel,
+        )
+
 
 def _mechanism_tool_choice(
     mechanism: StructuredOutputMechanism | None, tool_choice: ToolChoice | None
@@ -137,8 +150,8 @@ def _compaction_split(messages: Messages, preserved_messages: int | float) -> in
 
     preserve = max(0.0, float(preserved_messages))
     kept = math.ceil(len(messages) * preserve) if 0 < preserve < 1 else int(preserve)
-    end = max(0, min(len(messages) - kept, len(messages)))
-    end = next((index for index in range(end) if is_pinned(messages, index)), end)
+    cut = max(0, min(len(messages) - kept, len(messages)))
+    end = next((index for index in range(cut) if is_pinned(messages, index)), cut)
 
     prompt_indexes = [
         index
@@ -146,6 +159,9 @@ def _compaction_split(messages: Messages, preserved_messages: int | float) -> in
         if message["role"] == "user" and not any("toolResult" in block for block in message["content"])
     ]
     split = max((index for index in prompt_indexes if 0 < index <= end), default=0)
+    if split == 0 and any(0 < index <= cut for index in prompt_indexes):
+        # The compaction block must open the history, so nothing can be kept verbatim ahead of it.
+        logger.warning("pinned_index=<%d> | pinned message precedes every cut point, skipping native compaction", end)
     if split == 1 and all("compaction" in block for block in messages[0]["content"]):
         return 0
     return split
@@ -213,6 +229,7 @@ class AnthropicModel(Model):
         """
         validate_config_keys(model_config, self.AnthropicConfig)
         _warn_on_deprecated_cache_tools(model_config, stacklevel=3)
+        _warn_if_compaction_unsupported(dict(model_config), stacklevel=3)
         self.config = AnthropicModel.AnthropicConfig(**model_config)
 
         if "anthropic_tools" in self.config:
@@ -237,6 +254,7 @@ class AnthropicModel(Model):
             self._validate_anthropic_tools(model_config["anthropic_tools"])
 
         _warn_on_deprecated_cache_tools(model_config, stacklevel=3)
+        _warn_if_compaction_unsupported(dict(model_config), stacklevel=3)
         self.config.update(model_config)
 
     @override

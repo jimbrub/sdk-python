@@ -1837,6 +1837,37 @@ class TestCompact:
         anthropic_client.beta.messages.create.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_returns_none_and_warns_when_a_pinned_first_message_blocks_every_cut(
+        self, model_with_client, anthropic_client, messages, caplog
+    ):
+        anthropic_client.beta.messages.create = unittest.mock.AsyncMock()
+        messages[0]["metadata"] = {"custom": {"pinned": True}}
+
+        with caplog.at_level(logging.WARNING, logger="strands.models.anthropic"):
+            result = await model_with_client.compact(messages, preserved_messages=1)
+
+        assert result is None
+        anthropic_client.beta.messages.create.assert_not_called()
+        assert "pinned message precedes every cut point" in caplog.text
+
+    def test_warns_when_compaction_is_enabled_on_an_sdk_without_it(self, anthropic_client, monkeypatch):
+        _ = anthropic_client
+        monkeypatch.setattr(strands.models.anthropic, "_SDK_SUPPORTS_COMPACTION", False)
+
+        with pytest.warns(UserWarning, match=r"anthropic>=1\.6\.0"):
+            model = AnthropicModel(model_id="m", max_tokens=1, requires_server_side_compaction=True)
+        with pytest.warns(UserWarning, match=r"anthropic>=1\.6\.0"):
+            model.update_config(requires_server_side_compaction=True)
+
+    def test_does_not_warn_when_the_sdk_supports_compaction(self, anthropic_client, monkeypatch):
+        _ = anthropic_client
+        monkeypatch.setattr(strands.models.anthropic, "_SDK_SUPPORTS_COMPACTION", True)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            AnthropicModel(model_id="m", max_tokens=1, requires_server_side_compaction=True)
+
+    @pytest.mark.asyncio
     async def test_returns_none_on_request_error(self, model_with_client, anthropic_client, messages, caplog):
         anthropic_client.beta.messages.create = unittest.mock.AsyncMock(side_effect=RuntimeError("boom"))
 

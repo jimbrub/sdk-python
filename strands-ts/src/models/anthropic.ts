@@ -78,8 +78,9 @@ function compactionSplitIndex(messages: Message[], preservedMessages: number): n
 
   const preserve = Math.max(0, preservedMessages)
   const kept = preserve > 0 && preserve < 1 ? Math.ceil(messages.length * preserve) : Math.trunc(preserve)
-  let end = Math.max(0, Math.min(messages.length - kept, messages.length))
-  for (let index = 0; index < end; index++) {
+  const cut = Math.max(0, Math.min(messages.length - kept, messages.length))
+  let end = cut
+  for (let index = 0; index < cut; index++) {
     if (isPinned(messages, index)) {
       end = index
       break
@@ -97,6 +98,10 @@ function compactionSplitIndex(messages: Message[], preservedMessages: number): n
   let split = 0
   for (const index of promptIndexes) {
     if (index > 0 && index <= end) split = index
+  }
+  if (split === 0 && promptIndexes.some((index) => index > 0 && index <= cut)) {
+    // The compaction block must open the history, so nothing can be kept verbatim ahead of it.
+    logger.warn(`pinned_index=<${end}> | pinned message precedes every cut point, skipping native compaction`)
   }
   if (split === 1 && messages[0]!.content.every((block) => block.type === 'compactionBlock')) return 0
   return split

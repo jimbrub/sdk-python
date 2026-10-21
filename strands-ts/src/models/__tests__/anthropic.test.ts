@@ -1465,6 +1465,25 @@ describe('AnthropicModel', () => {
       expect(mockCreate).not.toHaveBeenCalled()
     })
 
+    it('returns undefined and warns when a pinned first message blocks every cut point', async () => {
+      const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+      const mockCreate = vi.fn()
+      const client = createCompactClient(mockCreate)
+      const model = new AnthropicModel({ client, modelId: 'claude-sonnet-4-6' })
+      const messages = [
+        new Message({ role: 'user', content: [new TextBlock('task')], metadata: { custom: { pinned: true } } }),
+        new Message({ role: 'assistant', content: [new TextBlock('ok')] }),
+        new Message({ role: 'user', content: [new TextBlock('recent')] }),
+      ]
+
+      const result = await model.compact(messages, { preservedMessages: 1 })
+
+      expect(result).toBeUndefined()
+      expect(mockCreate).not.toHaveBeenCalled()
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('pinned message precedes every cut point'))
+      warnSpy.mockRestore()
+    })
+
     it('returns undefined when the request fails', async () => {
       const mockCreate = vi.fn(async () => {
         throw new Error('boom')
