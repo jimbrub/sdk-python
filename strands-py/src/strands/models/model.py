@@ -238,6 +238,7 @@ class Model(abc.ABC):
         preserved_messages: int | float = 0,
         tool_specs: list[ToolSpec] | None = None,
         system_prompt: str | None = None,
+        instructions: str | None = None,
     ) -> Messages | None:
         """Reduce context through the provider's server-side compaction.
 
@@ -256,6 +257,8 @@ class Model(abc.ABC):
                 in the same shape as `OffloadConditions.preserve_recent`.
             tool_specs: Tool specifications to include in the compaction request.
             system_prompt: Plain string system prompt to include in the compaction request.
+            instructions: Custom summarization prompt that replaces the provider's default one. The
+                request's system prompt is left unchanged.
 
         Returns:
             `[compaction message, *preserved messages]`, or `None` when there was nothing to compact.

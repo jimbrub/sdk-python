@@ -316,6 +316,23 @@ class TestSummarizeStrategyServerSideCompaction:
         assert messages == [compaction_message, preserved]
 
     @pytest.mark.asyncio
+    async def test_passes_custom_system_prompt_as_compaction_instructions(self, mock_agent):
+        mock_agent.model.requires_server_side_compaction = True
+        mock_agent.model.compact = unittest.mock.AsyncMock(return_value=None)
+        strategy = Offload.summarize("*", {"system_prompt": "Keep file paths."}).when(utilization=0.8)
+        messages: Messages = [
+            Message(role="user", content=[ContentBlock(text="old1")]),
+            Message(role="user", content=[ContentBlock(text="recent")]),
+        ]
+        mock_agent.messages = messages
+        context = ContextState(messages=messages, agent=mock_agent, utilization=0.9)
+
+        await strategy.apply(context)
+
+        assert mock_agent.model.compact.call_args[1]["instructions"] == "Keep file paths."
+        assert mock_agent.model.compact.call_args[1]["system_prompt"] == mock_agent.system_prompt
+
+    @pytest.mark.asyncio
     async def test_falls_back_to_false_when_compact_returns_none(self, mock_agent):
         mock_agent.model.requires_server_side_compaction = True
         mock_agent.model.compact = unittest.mock.AsyncMock(return_value=None)

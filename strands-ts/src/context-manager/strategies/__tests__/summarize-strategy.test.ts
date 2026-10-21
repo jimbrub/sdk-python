@@ -229,6 +229,20 @@ describe('Offload.summarize', () => {
       expect(messages).toEqual([compactionMessage, preserved])
     })
 
+    it('passes a custom system prompt as the compaction instructions', async () => {
+      const compact = vi.fn(async () => undefined)
+      const mockModel = { stream: vi.fn(), requiresServerSideCompaction: true, compact }
+      const strategy = Offload.summarize('*', { systemPrompt: 'Keep file paths.' }).when({ utilization: 0.8 })
+      const context = makeContext(makeMessages(), 0.9, mockModel)
+
+      await strategy.apply(context)
+
+      expect(compact).toHaveBeenCalledWith(
+        expect.any(Array),
+        expect.objectContaining({ instructions: 'Keep file paths.' })
+      )
+    })
+
     it('falls back to false when compact returns undefined', async () => {
       const compact = vi.fn(async () => undefined)
       const mockModel = { stream: vi.fn(), requiresServerSideCompaction: true, compact }

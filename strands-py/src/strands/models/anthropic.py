@@ -1046,6 +1046,7 @@ class AnthropicModel(Model):
         preserved_messages: int | float = 0,
         tool_specs: list[ToolSpec] | None = None,
         system_prompt: str | None = None,
+        instructions: str | None = None,
     ) -> Messages | None:
         """Reduce context through Anthropic's server-side compaction, instead of a client-side summary.
 
@@ -1073,6 +1074,9 @@ class AnthropicModel(Model):
             tool_specs: Tool specifications to include in the compaction request, so the summary
                 reflects the tools that were available when the compacted messages were produced.
             system_prompt: Plain string system prompt to include in the compaction request.
+            instructions: Custom summarization prompt, sent as the compaction request's ``instructions``.
+                It replaces Anthropic's default summarization prompt; ``system`` is left unchanged so the
+                request still matches the live conversation.
 
         Returns:
             ``[compaction message, *preserved messages]``, or ``None`` when there was nothing old
@@ -1090,7 +1094,7 @@ class AnthropicModel(Model):
         older, recent = messages[:split], messages[split:]
         request = self.format_request(older, tool_specs, system_prompt)
         request.pop("stream", None)
-        request["compaction"] = {"type": "summarize"}
+        request["compaction"] = {"type": "summarize", **({"instructions": instructions} if instructions else {})}
         request["betas"] = [_COMPACT_BETA]
         logger.debug("request=<%s> | native compaction request", request)
 

@@ -1788,6 +1788,18 @@ class TestCompact:
         assert len(call_kwargs["messages"]) == 2
 
     @pytest.mark.asyncio
+    async def test_sends_instructions_on_the_compaction_param(self, model_with_client, anthropic_client, messages):
+        anthropic_client.beta.messages.create = unittest.mock.AsyncMock(return_value=self._compaction_response())
+
+        await model_with_client.compact(
+            messages, preserved_messages=1, system_prompt="You are helpful.", instructions="Keep file paths."
+        )
+
+        call_kwargs = anthropic_client.beta.messages.create.call_args[1]
+        assert call_kwargs["compaction"] == {"type": "summarize", "instructions": "Keep file paths."}
+        assert call_kwargs["system"] == "You are helpful."
+
+    @pytest.mark.asyncio
     async def test_includes_encrypted_content_when_present(self, model_with_client, anthropic_client, messages):
         anthropic_client.beta.messages.create = unittest.mock.AsyncMock(
             return_value=self._compaction_response(encrypted_content="opaque")

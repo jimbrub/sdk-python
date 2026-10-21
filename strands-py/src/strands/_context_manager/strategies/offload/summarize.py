@@ -103,6 +103,7 @@ class SummarizeStrategy(BaseOffloadStrategy):
             preserved_messages=self._preserve_recent,
             tool_specs=agent.tool_registry.get_all_tool_specs(),
             system_prompt=agent.system_prompt,
+            instructions=self._config.get("system_prompt"),
         )
         if compacted is None:
             return False  # provider produced no summary, so leave the history unchanged

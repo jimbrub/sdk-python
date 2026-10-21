@@ -385,7 +385,8 @@ export abstract class Model<T extends BaseModelConfig = BaseModelConfig> {
    *   `systemPrompt`/`toolSpecs`, which the caller MUST pass through unchanged from the live
    *   conversation: a provider that binds a thinking block's signature to its prefix (system +
    *   tools + history) rejects the compaction request if either differs from what produced the
-   *   blocks being replayed into it.
+   *   blocks being replayed into it. `instructions` is a custom summarization prompt that replaces
+   *   the provider's default one; the request's system prompt is left unchanged.
    * @returns `[compaction message, ...preserved messages]`, or `undefined` when there was
    *   nothing to compact.
    * @throws Error - Always, unless overridden by a provider that supports it.
@@ -397,6 +398,7 @@ export abstract class Model<T extends BaseModelConfig = BaseModelConfig> {
       preservedMessages?: number
       systemPrompt?: SystemPrompt
       toolSpecs?: ToolSpec[]
+      instructions?: string
     } = {}
   ): Promise<Message[] | undefined> {
     void messages

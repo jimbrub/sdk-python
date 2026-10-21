@@ -324,7 +324,9 @@ export class AnthropicModel extends Model<AnthropicModelConfig> {
    *   `preservedMessages`, how many of the most recent messages to keep verbatim, in the same
    *   count-or-ratio shape as `OffloadConditions.preserveRecent`. The split additionally never
    *   separates a `toolUse` from its `toolResult` and never cuts before a pinned message, so it
-   *   may preserve more than requested.
+   *   may preserve more than requested. `instructions` is sent as the compaction request's
+   *   `instructions`, replacing Anthropic's default summarization prompt; `system` is left
+   *   unchanged so the request still matches the live conversation.
    * @returns `[compaction message, ...preserved messages]`, or `undefined` when there was nothing
    *   old enough to compact, or the provider reported the compaction attempt failed.
    */
@@ -335,9 +337,10 @@ export class AnthropicModel extends Model<AnthropicModelConfig> {
       preservedMessages?: number
       systemPrompt?: SystemPrompt
       toolSpecs?: ToolSpec[]
+      instructions?: string
     } = {}
   ): Promise<Message[] | undefined> {
-    const { utilization, preservedMessages = 0, systemPrompt, toolSpecs } = conditions
+    const { utilization, preservedMessages = 0, systemPrompt, toolSpecs, instructions } = conditions
     const split = compactionSplitIndex(messages, preservedMessages)
     if (split <= 0) {
       logger.debug(
@@ -360,7 +363,7 @@ export class AnthropicModel extends Model<AnthropicModelConfig> {
 
     const compactionRequest = {
       ...request,
-      compaction: { type: 'summarize' },
+      compaction: { type: 'summarize', ...(instructions && { instructions }) },
       betas: this._compactionBetas(),
     }
     logger.debug(`request=<${JSON.stringify(compactionRequest)}> | native compaction request`)

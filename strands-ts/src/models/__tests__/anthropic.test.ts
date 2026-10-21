@@ -1417,6 +1417,22 @@ describe('AnthropicModel', () => {
       expect(call.messages).toHaveLength(2)
     })
 
+    it('sends instructions on the compaction param and leaves the system prompt unchanged', async () => {
+      const mockCreate = vi.fn(async (..._args: unknown[]) => createCompactionResponse())
+      const client = createCompactClient(mockCreate)
+      const model = new AnthropicModel({ client, modelId: 'claude-sonnet-4-6' })
+
+      await model.compact(makeMessages(), {
+        preservedMessages: 1,
+        systemPrompt: 'You are helpful.',
+        instructions: 'Keep file paths.',
+      })
+
+      const call = mockCreate.mock.calls[0]![0] as { compaction: unknown; system: unknown }
+      expect(call.compaction).toEqual({ type: 'summarize', instructions: 'Keep file paths.' })
+      expect(JSON.stringify(call.system)).toContain('You are helpful.')
+    })
+
     it('returns undefined when the provider reports a failed compaction', async () => {
       const mockCreate = vi.fn(async (..._args: unknown[]) => createCompactionResponse(null))
       const client = createCompactClient(mockCreate)

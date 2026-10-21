@@ -84,6 +84,7 @@ export class SummarizeStrategy extends BaseOffloadStrategy {
       preservedMessages: this._preserveRecent,
       ...(agent.systemPrompt !== undefined && { systemPrompt: agent.systemPrompt }),
       toolSpecs: agent.toolRegistry.list().map((tool) => tool.toolSpec),
+      ...(this._config.systemPrompt !== undefined && { instructions: this._config.systemPrompt }),
     })
     if (!compacted) return false // provider produced no summary, so leave the history unchanged
 
