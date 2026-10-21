@@ -215,6 +215,27 @@ export class SummarizeStrategy extends BaseOffloadStrategy {
 }
 ```
 
+### Compaction request settings
+
+On-demand compaction (`compact-2026-09-04`) has one setting besides `type`, and Strands fills in the rest from the strategy and the model:
+
+| Setting | How Strands sets it |
+|---|---|
+| `compaction.instructions` (up to 16,384 characters) | From `SummarizeConfig.systemPrompt`. It replaces Anthropic's default summarization prompt entirely, so it should say what the summary must keep and tell the model not to call tools. |
+| When to compact | There's no API setting: on-demand compaction runs when the request is sent. `Offload.summarize(...).when({ utilization, preserveRecent })` decides when to compact and where to cut. |
+| `max_tokens` | The model's `max_tokens`. It caps the whole summarization call, including thinking. A summary that hits the cap comes back empty (`stop_reason: "max_tokens"`), and `compact()` leaves the history unchanged. |
+
+There is no setting for summary length; `instructions` is the only way to steer it. The compaction request also uses the conversation's model, `system`, `tools`, and thinking settings, and the API rejects `stop_sequences`, `output_config.format`, and a forced `tool_choice` on it.
+
+Threshold compaction (`compact_20260112`, beta `compact-2026-01-12`) has more settings: `trigger` (input tokens, default 150,000, minimum 50,000), `pause_after_compaction`, and `instructions`. Strands doesn't use it. On preserved-thinking models, thinking from before its compaction block isn't carried forward, so turns kept after the block lose their thinking. It also can't be combined with on-demand compaction on one request.
+
+### Anthropic models on Bedrock
+
+The two ways to run Claude on Bedrock behave differently:
+
+- **`AnthropicModel` with a Bedrock client** is supported. Native compaction worked through `AsyncAnthropicBedrock` (Bedrock's InvokeModel endpoint) in all 36 native runs of the eval in "Server-Side Compaction Performance with Different `aux_model`". Anthropic's documentation doesn't list Bedrock for on-demand compaction, so it isn't confirmed that this support is intended or stable. In TypeScript the Bedrock client is passed as `client`. In Python, `AnthropicModel` only builds an `AsyncAnthropic` client from `client_args`, so a Bedrock client has to be assigned to `model.client` after construction. A first-class way to pass it is a candidate follow-up.
+- **`BedrockModel` (Converse API)** is not supported. Converse has no `compaction` parameter or content block, so `BedrockModel` doesn't override `compact()`, and the TypeScript `BedrockModel` rejects a `CompactionBlock`. `BedrockModel` still accepts `requires_server_side_compaction`. With the flag set, `compact()` raises, the context manager logs the strategy failure and continues, and the history isn't reduced. Rejecting the flag at config time on providers that don't implement `compact()` would surface this earlier. `BedrockModel` customers can use the client-side options in "Client-side summarization that stays valid on preserved-thinking models".
+
 ### Summarize
 
 Anthropic's answer to vended context modification is compaction. The public surface, `Offload.summarize(target).when({ utilization, preserveRecent })`, does not change. Behind it, `apply()` resolves the model as it does today (`this._config.model ?? agent.auxModel`). If `_isRetroactive` is set and that model's `requiresServerSideCompaction` is `true`, `SummarizeStrategy` calls `model.compact(...)` instead of generating a client-side summary. A customer who set `agent.auxModel` is still routed there, and `agent.model` is never read directly. `compact()` takes the customer's existing conditions as-is, so there is no second API to learn.
@@ -365,7 +386,7 @@ Without the flag, the same agent runs a client-side summary and the next request
   -[] Should there be protected_history? History/prefixes that are associated with a thinking block? 
 
 
--[] What about users that use Anthropic through bedrock and do not have an Anthropic API key? Will they fail silently, or do we need a new error? 
+-[] What about users that use Anthropic through bedrock and do not have an Anthropic API key? Will they fail silently, or do we need a new error? See "Anthropic models on Bedrock": `AnthropicModel` with a Bedrock client works, and `BedrockModel` fails without reducing the history.
 
 -[] **Model resolution for server-side compaction must go through `agent.auxModel`, not `agent.model`, directly** — fixed in Approach 1 above (`apply()` now resolves once via `this._config.model ?? agent.auxModel` and reuses that same model for both the gating check and the `compact()` call, matching `agent.auxModel`'s [existing fallback to `agent.model`](https://github.com/strands-agents/harness-sdk/blob/1adcaf9fbf5f7709d25e5eb061e368527b48bb4c/strands-py/src/strands/agent/agent.py#L733) when the customer never set one). Still open: **what happens when `agent.aux_model` is explicitly set to a *different* model than the one that actually produced the conversation's thinking blocks?** Preserved-thinking signatures are cryptographically bound to the exact model + prefix (system prompt, tools, history) that generated them — compacting through a different model may not be able to validate those signatures at all, independent of whether the resolution logic is correct. Options to decide: (a) call `compact()` on the resolved model anyway and let the provider reject it, surfacing whatever error it returns; (b) detect the mismatch and fall back to `agent.model` with a warning; (c) treat it as a configuration error and fail fast before making the request. None of these is implemented yet — Part 1 only fixes *which* model gets resolved, not what to do when the resolved model can't be the one validating the signature.
 
