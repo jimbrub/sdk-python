@@ -127,7 +127,8 @@ def _compaction_split(messages: Messages, preserved_messages: int | float) -> in
 
     Mirrors `OffloadConditions.preserve_recent`'s count-or-ratio shape, then nudges the cut point
     to a user-turn boundary so a `toolUse` is never separated from its `toolResult`, and never cuts
-    before a pinned message.
+    before a pinned message. Returns 0 when the only message before the cut is a prior compaction,
+    since compacting it alone would not reduce the context.
     """
     from ..agent.conversation_manager.compression.pin_message import is_pinned
 
@@ -144,7 +145,10 @@ def _compaction_split(messages: Messages, preserved_messages: int | float) -> in
         for index, message in enumerate(messages)
         if message["role"] == "user" and not any("toolResult" in block for block in message["content"])
     ]
-    return max((index for index in prompt_indexes if 0 < index <= end), default=0)
+    split = max((index for index in prompt_indexes if 0 < index <= end), default=0)
+    if split == 1 and all("compaction" in block for block in messages[0]["content"]):
+        return 0
+    return split
 
 
 class AnthropicModel(Model):
@@ -1068,13 +1072,12 @@ class AnthropicModel(Model):
         older, recent = messages[:split], messages[split:]
         request = self.format_request(older, tool_specs, system_prompt)
         request.pop("stream", None)
+        request["compaction"] = {"type": "summarize"}
+        request["betas"] = [_COMPACT_BETA]
+        logger.debug("request=<%s> | native compaction request", request)
 
         try:
-            response = await self.client.beta.messages.create(
-                **request,
-                compaction={"type": "summarize"},
-                betas=[_COMPACT_BETA],
-            )
+            response = await self.client.beta.messages.create(**request)
         except Exception as e:
             logger.warning(
                 "model_id=<%s>, error=<%s> | native compaction request failed, leaving history unchanged",

@@ -70,7 +70,8 @@ const COMPACT_BETA = 'compact-2026-09-04'
  *
  * Mirrors `OffloadConditions.preserveRecent`'s count-or-ratio shape, then nudges the cut point to
  * a user-turn boundary so a `toolUse` is never separated from its `toolResult`, and never cuts
- * before a pinned message.
+ * before a pinned message. Returns 0 when the only message before the cut is a prior compaction,
+ * since compacting it alone would not reduce the context.
  */
 function compactionSplitIndex(messages: Message[], preservedMessages: number): number {
   if (messages.length === 0) return 0
@@ -97,6 +98,7 @@ function compactionSplitIndex(messages: Message[], preservedMessages: number): n
   for (const index of promptIndexes) {
     if (index > 0 && index <= end) split = index
   }
+  if (split === 1 && messages[0]!.content.every((block) => block.type === 'compactionBlock')) return 0
   return split
 }
 
@@ -280,10 +282,10 @@ export class AnthropicModel extends Model<AnthropicModelConfig> {
       // Mirrors stream(): once compaction is possible, history may carry a `compaction` block,
       // which only the beta endpoint accepts.
       const response = this.requiresServerSideCompaction
-        ? await this._client.beta.messages.countTokens(
-            { ...params, betas: [COMPACT_BETA] } as unknown as Anthropic.Beta.Messages.MessageCountTokensParams,
-            requestOptions
-          )
+        ? await this._client.beta.messages.countTokens({
+            ...params,
+            betas: this._compactionBetas(),
+          } as unknown as Anthropic.Beta.Messages.MessageCountTokensParams)
         : requestOptions
           ? await this._client.messages.countTokens(params, requestOptions)
           : await this._client.messages.countTokens(params)
@@ -351,13 +353,18 @@ export class AnthropicModel extends Model<AnthropicModelConfig> {
     })
     delete (request as { stream?: boolean }).stream
 
+    const compactionRequest = {
+      ...request,
+      compaction: { type: 'summarize' },
+      betas: this._compactionBetas(),
+    }
+    logger.debug(`request=<${JSON.stringify(compactionRequest)}> | native compaction request`)
+
     let response: Anthropic.Beta.Messages.BetaMessage
     try {
-      response = await this._client.beta.messages.create({
-        ...(request as unknown as Anthropic.Beta.Messages.MessageCreateParamsNonStreaming),
-        compaction: { type: 'summarize' },
-        betas: [COMPACT_BETA],
-      } as unknown as Anthropic.Beta.Messages.MessageCreateParamsNonStreaming)
+      response = await this._client.beta.messages.create(
+        compactionRequest as unknown as Anthropic.Beta.Messages.MessageCreateParamsNonStreaming
+      )
     } catch (error) {
       logger.warn(`model_id=<${this._config.modelId}>, error=<${error}> | native compaction request failed`)
       return undefined
@@ -414,18 +421,13 @@ export class AnthropicModel extends Model<AnthropicModelConfig> {
       // overloaded `.stream()` signature through a union-typed resource variable, so branch
       // explicitly instead of picking one `messagesResource` up front.
       const useBeta = this.requiresServerSideCompaction
-      const betaOptions = useBeta ? { ...(requestOptions ?? {}), betas: [COMPACT_BETA] } : undefined
 
       while (true) {
         const stream = useBeta
-          ? betaOptions
-            ? this._client.beta.messages.stream(
-                request as unknown as Anthropic.Beta.Messages.MessageCreateParamsStreaming,
-                betaOptions
-              )
-            : this._client.beta.messages.stream(
-                request as unknown as Anthropic.Beta.Messages.MessageCreateParamsStreaming
-              )
+          ? this._client.beta.messages.stream({
+              ...request,
+              betas: this._compactionBetas(),
+            } as unknown as Anthropic.Beta.Messages.MessageCreateParamsStreaming)
           : requestOptions
             ? this._client.messages.stream(request, requestOptions)
             : this._client.messages.stream(request)
@@ -631,6 +633,18 @@ export class AnthropicModel extends Model<AnthropicModelConfig> {
 
       throw error
     }
+  }
+
+  /**
+   * Betas for a beta-endpoint request: the compaction beta plus any configured ones.
+   *
+   * The SDK turns the body's `betas` into an `anthropic-beta` header that replaces the client's,
+   * so configured, client, and thinking-binding betas all go in the body.
+   */
+  private _compactionBetas(): string[] {
+    const betas = new Set([COMPACT_BETA, ...(this._config.betas ?? []), ...this._clientBetas])
+    if (this._dropsStaleThinking()) betas.add(THINKING_BINDING_BETA)
+    return [...betas]
   }
 
   private _buildRequestOptions(): Anthropic.RequestOptions | undefined {

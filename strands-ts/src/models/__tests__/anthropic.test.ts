@@ -12,6 +12,8 @@ import {
   ToolResultBlock,
   JsonBlock,
   ReasoningBlock,
+  CompactionBlock,
+  ToolUseBlock,
 } from '../../types/messages.js'
 import { ImageBlock, DocumentBlock, VideoBlock } from '../../types/media.js'
 import { warnOnce } from '../../logging/warn-once.js'
@@ -228,8 +230,35 @@ describe('AnthropicModel', () => {
       await collectIterator(provider.stream(messages))
 
       expect(betaStream).toHaveBeenCalledOnce()
-      expect(betaStream.mock.calls[0]![1]).toMatchObject({ betas: ['compact-2026-09-04'] })
+      // The SDK reads `betas` from the request body, not from request options.
+      expect(betaStream.mock.calls[0]![0]).toMatchObject({ betas: ['compact-2026-09-04'] })
+      expect(betaStream.mock.calls[0]![1]).toBeUndefined()
       expect(mockClient.messages.stream).not.toHaveBeenCalled()
+    })
+
+    it('sends configured betas alongside the compaction beta in the request body', async () => {
+      const betaStream = vi.fn(async function* (..._args: unknown[]) {
+        yield { type: 'message_start', message: { role: 'assistant', usage: { input_tokens: 10 } } }
+        yield { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 5 } }
+        yield { type: 'message_stop' }
+      })
+      const mockClient = {
+        messages: { stream: vi.fn(), countTokens: vi.fn() },
+        beta: { messages: { stream: betaStream, countTokens: vi.fn() } },
+      } as unknown as Anthropic
+      const provider = new AnthropicModel({
+        client: mockClient,
+        requiresServerSideCompaction: true,
+        betas: ['interleaved-thinking-2025-05-14'],
+      })
+      const messages = [new Message({ role: 'user', content: [new TextBlock('Hi')] })]
+
+      await collectIterator(provider.stream(messages))
+
+      expect(betaStream.mock.calls[0]![0]).toMatchObject({
+        betas: ['compact-2026-09-04', 'interleaved-thinking-2025-05-14'],
+      })
+      expect(betaStream.mock.calls[0]![1]).toBeUndefined()
     })
 
     it('yields correct event sequence for simple text response', async () => {
@@ -1406,6 +1435,31 @@ describe('AnthropicModel', () => {
       const result = await model.compact([new Message({ role: 'user', content: [new TextBlock('hi')] })], {
         preservedMessages: 1,
       })
+
+      expect(result).toBeUndefined()
+      expect(mockCreate).not.toHaveBeenCalled()
+    })
+
+    it('returns undefined without calling the client when only a prior compaction precedes the cut', async () => {
+      const mockCreate = vi.fn()
+      const client = createCompactClient(mockCreate)
+      const model = new AnthropicModel({ client, modelId: 'claude-sonnet-4-6' })
+      const messages = [
+        new Message({ role: 'assistant', content: [new CompactionBlock({ content: 'summary', signature: 'sig' })] }),
+        new Message({ role: 'user', content: [new TextBlock('count words')] }),
+        new Message({
+          role: 'assistant',
+          content: [new ToolUseBlock({ name: 'word_count', toolUseId: 't1', input: {} })],
+        }),
+        new Message({
+          role: 'user',
+          content: [new ToolResultBlock({ toolUseId: 't1', status: 'success', content: [new TextBlock('9')] })],
+        }),
+        new Message({ role: 'assistant', content: [new TextBlock('9')] }),
+        new Message({ role: 'user', content: [new TextBlock('next')] }),
+      ]
+
+      const result = await model.compact(messages, { preservedMessages: 2 })
 
       expect(result).toBeUndefined()
       expect(mockCreate).not.toHaveBeenCalled()

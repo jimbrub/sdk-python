@@ -1819,6 +1819,24 @@ class TestCompact:
         anthropic_client.beta.messages.create.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_returns_none_when_only_a_prior_compaction_precedes_the_cut(
+        self, model_with_client, anthropic_client
+    ):
+        compacted_with_tool_turn = [
+            {"role": "assistant", "content": [{"compaction": {"content": "summary", "signature": "sig"}}]},
+            {"role": "user", "content": [{"text": "count words"}]},
+            {"role": "assistant", "content": [{"toolUse": {"toolUseId": "t1", "name": "word_count", "input": {}}}]},
+            {"role": "user", "content": [{"toolResult": {"toolUseId": "t1", "status": "success", "content": []}}]},
+            {"role": "assistant", "content": [{"text": "9"}]},
+            {"role": "user", "content": [{"text": "next"}]},
+        ]
+
+        result = await model_with_client.compact(compacted_with_tool_turn, preserved_messages=2)
+
+        assert result is None
+        anthropic_client.beta.messages.create.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_returns_none_on_request_error(self, model_with_client, anthropic_client, messages, caplog):
         anthropic_client.beta.messages.create = unittest.mock.AsyncMock(side_effect=RuntimeError("boom"))
 
