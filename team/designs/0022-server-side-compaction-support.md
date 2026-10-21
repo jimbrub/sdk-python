@@ -773,7 +773,9 @@ This eval compares summary quality and thinking continuity across three ways of 
 | Summary quality, LLM judge (0–1) | 0.96 | 0.95 | 0.96 |
 | Facts kept in the summary | 0.98 | 0.94 | 0.99 |
 | Recall probe / reasoning probe | 1.00 / 1.00 | 1.00 / 1.00 | 1.00 / 1.00 |
-| Output tokens per run (after compaction) | 2,650 (716) | 2,726 (763) | 3,288 (938) |
+| Main-agent output tokens per run (after compaction) | 2,650 (716) | 2,726 (763) | 2,854 (938) |
+| Compaction or summarizer call, input / output tokens | 2,010 / 511 | 1,868 / 749 | 889 / 434 |
+| Prompt-cache reads | not measured | not measured | not measured |
 | Compaction latency | 5.6 s | 4.6 s | 5.5 s |
 
 The judge is Sonnet 5.5. It scores completeness and faithfulness against the summarized messages and the system prompt, and checks that the text is a summary rather than an answer to the pending request.
@@ -782,11 +784,11 @@ The judge is Sonnet 5.5. It scores completeness and faithfulness against the sum
 
 - **Server-side compaction keeps preserved thinking valid.** Under `prefix_mismatch_behavior: "error"`, every native run replayed its pre-compaction thinking after the compaction block with no 400s and no dropped blocks. Thinking produced after compaction also replayed cleanly.
 - **A different `aux_model` can compact the history.** Haiku 5.5 compacted Opus 5.5's signed history in 18 of 18 runs, and Opus then continued with its earlier thinking intact. Summary quality was on par with Opus compacting its own history. Haiku's summaries were slightly less faithful: one run added a "Corrections" section for retractions the assistant never made. At $0.10 per million input tokens against Opus's $4.00, Haiku is a cheap compactor. This was measured for Opus 5.5 to Haiku 5.5 on Bedrock only.
-- **The client-side path summarizes just as well but loses the reasoning.** Its summaries scored the same as native ones. But every run hit a binding 400, and the `drop_block` retry discarded 72 of 90 pre-compaction thinking blocks (80%). Those runs used about 24% more output tokens overall, and about 31% more after compaction, consistent with the model regenerating the reasoning it lost.
+- **The client-side path summarizes just as well but loses the reasoning.** Its summaries scored the same as native ones. But every run hit a binding 400, and the `drop_block` retry discarded 72 of 90 pre-compaction thinking blocks (80%). After compaction, the main agent produced about 31% more output tokens than in `native_same` (938 against 716 per run), consistent with the model regenerating the reasoning it lost. Over the whole run the gap is smaller: 8% more main-agent output, and about 4% more once the summarization calls are included.
 - **Native compaction works on Bedrock.** Every run went through `AsyncAnthropicBedrock`, even though Anthropic's documentation lists on-demand compaction as unavailable on Bedrock.
-- **The client-side summarizer request is malformed.** The first summarization request was rejected in all 18 `client_drop` runs (`tool_use` blocks in a user message), and fell back to a text-only summary. See the summarizer bug noted on PR #5287.
+- **The client-side summarizer request is malformed.** The first summarization request was rejected in all 18 `client_drop` runs (`tool_use` blocks in a user message), and fell back to a text-only summary. That is why its summarizer read less than half the input of a native compaction (889 against about 2,000 tokens): tool content never reached it. See the summarizer bug noted on PR #5287.
 
-**Limits.** The conversations are short (about 20k input tokens summed across all of a run's requests), and each compacts only once. The recall and reasoning probes scored 1.00 in every arm, partly because the preserved tail restates many of the facts, so they don't separate the arms. Haiku's lower fact score comes from one scenario where the agent found the invoice record only after the cut, so those facts were never in the summarized messages. The run doesn't measure the direct Claude API, other model pairs, or repeated compaction.
+**Limits.** The conversations are short (about 20k input tokens summed across all of a run's requests), and each compacts only once. The recall and reasoning probes scored 1.00 in every arm, partly because the preserved tail restates many of the facts, so they don't separate the arms. Haiku's lower fact score comes from one scenario where the agent found the invoice record only after the cut, so those facts were never in the summarized messages. Prompt caching was off (no `cache_config` on either model), so every request reports zero cache reads and writes, and cache behavior is unmeasured. Native compaction reports its token usage in `usage.iterations` rather than the top-level `usage` fields; the token rows above include it. The run doesn't measure the direct Claude API, other model pairs, or repeated compaction.
 
 </details>
 
