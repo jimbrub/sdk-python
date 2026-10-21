@@ -131,7 +131,7 @@ export abstract class BaseOffloadStrategy implements ContextStrategy {
 
 Auto mode's tool-result truncation runs eagerly, when the result is added and before the model sees it, so it doesn't affect preserved thinking. A truncate strategy with `preserveRecent > 0` instead truncates results the model has already seen, which invalidates later thinking blocks.
 
-`Model` gets a non-abstract `compact()` that throws by default, so `SummarizeStrategy` can call it without importing `AnthropicModel`, the only provider that overrides it. The parameters mirror `OffloadConditions`. `utilization` is passed through only for logging, since `apply()` has already decided to compact. `preservedMessages` takes the same count-or-ratio as `preserveRecent` and sets the cut point. The cut respects pinned messages and never separates a `toolUse` from its `toolResult`. `instructions` carries the strategy's custom summarization prompt (`SummarizeConfig.systemPrompt`) into the provider's compaction instructions. In Python the signature is `compact(messages, *, utilization=None, preserved_messages=0, instructions=None)`.
+`Model` gets a non-abstract `compact()` that throws by default, so `SummarizeStrategy` can call it without importing `AnthropicModel`, the only provider that overrides it. The parameters mirror `OffloadConditions`. `utilization` is passed through only for logging, since `apply()` has already decided to compact. `preservedMessages` takes the same count-or-ratio as `preserveRecent` and sets the cut point. The cut respects pinned messages and never separates a `toolUse` from its `toolResult`. `systemPrompt` and `toolSpecs` are the live conversation's, passed through unchanged, because the compaction request must match the prefix the thinking blocks are bound to. `instructions` carries the strategy's custom summarization prompt (`SummarizeConfig.systemPrompt`) into the provider's compaction instructions. In Python the signature is `compact(messages, *, utilization=None, preserved_messages=0, tool_specs=None, system_prompt=None, instructions=None)`.
 
 ```typescript
 export abstract class Model<T extends BaseModelConfig = BaseModelConfig> {
@@ -143,14 +143,21 @@ export abstract class Model<T extends BaseModelConfig = BaseModelConfig> {
    *
    * @param messages - Full conversation history; `compact` picks its own cut point from `preservedMessages`.
    * @param conditions - `utilization` (diagnostics/logging only — gating already happened in the strategy),
-   *   `preservedMessages` (count, or ratio in (0, 1), of trailing messages to keep verbatim), and
+   *   `preservedMessages` (count, or ratio in (0, 1), of trailing messages to keep verbatim),
+   *   `systemPrompt` and `toolSpecs` (the live conversation's, passed through unchanged), and
    *   `instructions` (a custom summarization prompt sent as the provider's compaction instructions;
    *   the request's system prompt is left unchanged).
    * @returns `[CompactionBlock message, ...preserved messages]`, or `undefined` if there was nothing to compact.
    */
   async compact(
     messages: Message[],
-    conditions: { utilization?: number; preservedMessages?: number; instructions?: string }
+    conditions: {
+      utilization?: number
+      preservedMessages?: number
+      systemPrompt?: SystemPrompt
+      toolSpecs?: ToolSpec[]
+      instructions?: string
+    } = {}
   ): Promise<Message[] | undefined> {
     throw new Error(`${this.constructor.name} does not implement server-side compaction`)
   }
@@ -165,6 +172,10 @@ export class SummarizeStrategy extends BaseOffloadStrategy {
 
   override async apply(context: ContextState): Promise<boolean> {
     const model = this._resolveModel(context.agent) // this._config.model ?? context.agent.auxModel
+    // The server-side branch bypasses super.apply(), where the utilization gate otherwise lives.
+    if (this._isMessageLevel && !context.overflow && context.utilization < this._utilizationThreshold!) {
+      return false
+    }
     if (this._isRetroactive && model?.requiresServerSideCompaction) {
       return this._applyServerSide(context, model)
     }
@@ -184,13 +195,17 @@ export class SummarizeStrategy extends BaseOffloadStrategy {
    * back if they configured `agent.auxModel`.
    */
   private async _applyServerSide(context: ContextState, model: Model): Promise<boolean> {
-    const { messages, utilization } = context
+    const { messages, utilization, agent } = context
     // Gating already happened in apply(); utilization is passed through for
     // AnthropicModel's own logging, not re-checked here.
     const compacted = await model.compact(messages, {
       utilization,
       preservedMessages: this._preserveRecent,
-      instructions: this._config.systemPrompt, // the strategy's custom summarization prompt, if set
+      // The compaction request must carry the live system prompt and tools, or the
+      // provider rejects it as a different conversation.
+      ...(agent.systemPrompt !== undefined && { systemPrompt: agent.systemPrompt }),
+      toolSpecs: agent.toolRegistry.list().map((tool) => tool.toolSpec),
+      ...(this._config.systemPrompt !== undefined && { instructions: this._config.systemPrompt }),
     })
     if (!compacted) return false // provider produced no summary, so leave the history unchanged
 
