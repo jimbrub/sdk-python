@@ -317,8 +317,6 @@ Part 2 will focus on implementing some of the server-side context management tec
 |---|---|---|
 | Retroactive tool-result truncate or drop, and the agentic `truncate_context` tool | `clear_tool_uses_20250919` context edit | `context-management-2025-06-27` |
 | None (offload strategies skip `ReasoningBlock`) | `clear_thinking_20251015` context edit | `context-management-2025-06-27` |
-| Changing `agent.systemPrompt` mid-session | Mid-conversation `role: "system"` message | None (`clear_at` reminders: `mid-conversation-system-clear-at-2026-08-21`) |
-| Adding or removing tools mid-session | `tool_addition` / `tool_removal` blocks in a `role: "system"` message | `mid-conversation-tool-changes-2026-07-01` |
 
 #### Clearing Tool Uses
 
@@ -349,19 +347,6 @@ The response reports what the server cleared in `context_management.applied_edit
 The `clear_thinking_20251015` edit clears thinking blocks from older assistant turns on the server. Strands has no thinking-reduction strategy today; offload strategies skip `ReasoningBlock` on purpose. This edit would let customers trim old reasoning tokens without invalidating anything.
 
 It has one setting, `keep: { type: "thinking_turns", value: N }` or `"all"`. On the 5.5 models the default is `"all"`, so a strategy has to set `keep` explicitly to clear anything. Clearing invalidates the prompt cache from the clear point onward, so `keep` trades context space against cache hits. When both edits are sent, `clear_thinking_20251015` must come first in `edits`. Cleared turns are reported in `context_management.applied_edits` (`cleared_thinking_turns`, `cleared_input_tokens`), the same as tool-use clearing.
-
-#### System Prompt Changes
-
-Changing `agent.systemPrompt` mid-session edits the top-level `system` field, which every thinking block is bound to, so all earlier thinking is invalidated. The append-only form is a [mid-conversation system message](https://platform.claude.com/docs/en/build-with-claude/mid-conversation-system-messages): append a `{ "role": "system", ... }` message instead of editing `system`. It needs no beta and works on Bedrock through InvokeModel.
-
-For per-turn reminders, which is the context injector question in Open Questions, a system message with `clear_at: "next_user_message"` (beta `mid-conversation-system-clear-at-2026-08-21`) is shown for one turn and then stays in the history cleared. Deleting an earlier reminder would invalidate later thinking.
-
-#### Tool List Changes
-
-Adding or removing a tool, or regenerating a tool's description or schema (a date, a version), changes `tools` and invalidates every earlier thinking block. The API reports it as `tool_schema_changed`. This happens most often when an MCP server connects partway through a session. The append-only form is a `role: "system"` message that carries `tool_addition` or `tool_removal` blocks (beta `mid-conversation-tool-changes-2026-07-01`).
-
-Suggested order: tool-use clearing first, since it replaces something Strands does today and is the most common way customers hit the 400; then system prompt and tool list changes, which are append-only rewrites of paths that break today; then thinking clearing, which is a new, optional capability.
-
 
 ### Implementation: Part 3
 
@@ -749,7 +734,7 @@ This eval compares summary quality and thinking continuity across three ways of 
 | `native_haiku` | `aux_model` = Haiku 5.5 | `AnthropicModel.compact()` on Haiku, over Opus's history |
 | `client_drop` | `aux_model` = Opus 5.5, `requires_server_side_compaction=False` | client-side summary, then the SDK's `drop_block` retry |
 
-**Setup.** The main agent is Opus 5.5 with adaptive thinking at effort `high`. Each of 6 scripted scenarios plants 7–10 facts through `lookup` tool calls, runs a reasoning turn whose thinking lands in the preserved tail, and compacts once with `Offload.summarize("*").when(utilization=..., preserve_recent=3)`. Three more turns follow: a recall probe, a numeric reasoning probe, and a follow-up that replays the post-compaction thinking. The native arms set `thinking.block_binding.prefix_mismatch_behavior: "error"`, so an invalid thinking block fails the request instead of being dropped silently. Every request carries the `thinking-binding-controls-2026-08-01` beta, so any dropped block is reported in `input_transformations` and can be attributed to the exact block. 3 reps per scenario, 54 runs in total.
+**Setup.** Opus 5.5 main agent, adaptive thinking at effort `high`. 6 scripted scenarios plant 7–10 facts through `lookup` calls, compact once with `preserve_recent=3`, then run a recall probe, a reasoning probe and a follow-up. Native arms set `prefix_mismatch_behavior: "error"` so an invalid thinking block fails instead of being dropped silently; every request carries `thinking-binding-controls-2026-08-01`, which reports each dropped block. 3 reps, 54 runs.
 
 | | `native_same` | `native_haiku` | `client_drop` |
 |---|---|---|---|
@@ -762,20 +747,19 @@ This eval compares summary quality and thinking continuity across three ways of 
 | Recall probe / reasoning probe | 1.00 / 1.00 | 1.00 / 1.00 | 1.00 / 1.00 |
 | Main-agent output tokens per run (after compaction) | 2,650 (716) | 2,726 (763) | 2,854 (938) |
 | Compaction or summarizer call, input / output tokens | 2,010 / 511 | 1,868 / 749 | 889 / 434 |
-| Prompt-cache reads | not measured | not measured | not measured |
 | Compaction latency | 5.6 s | 4.6 s | 5.5 s |
 
-The judge is Sonnet 5.5. It scores completeness and faithfulness against the summarized messages and the system prompt, and checks that the text is a summary rather than an answer to the pending request.
+The judge is Sonnet 5.5, scoring completeness and faithfulness against the summarized messages. Token rows include native compaction's `usage.iterations`.
 
 **Findings.**
 
-- **Server-side compaction keeps preserved thinking valid.** Under `prefix_mismatch_behavior: "error"`, every native run replayed its pre-compaction thinking after the compaction block with no 400s and no dropped blocks. Thinking produced after compaction also replayed cleanly.
-- **A different `aux_model` can compact the history.** Haiku 5.5 compacted Opus 5.5's signed history in 18 of 18 runs, and Opus then continued with its earlier thinking intact. Summary quality was on par with Opus compacting its own history. Haiku's summaries were slightly less faithful: one run added a "Corrections" section for retractions the assistant never made. At $0.10 per million input tokens against Opus's $4.00, Haiku is a cheap compactor. This was measured for Opus 5.5 to Haiku 5.5 on Bedrock only.
-- **The client-side path summarizes just as well but loses the reasoning.** Its summaries scored the same as native ones. But every run hit a binding 400, and the `drop_block` retry discarded 72 of 90 pre-compaction thinking blocks (80%). After compaction, the main agent produced about 31% more output tokens than in `native_same` (938 against 716 per run), consistent with the model regenerating the reasoning it lost. Over the whole run the gap is smaller: 8% more main-agent output, and about 4% more once the summarization calls are included.
-- **Native compaction works on Bedrock.** Every run went through `AsyncAnthropicBedrock`, even though Anthropic's documentation lists on-demand compaction as unavailable on Bedrock.
-- **The client-side summarizer request is malformed.** The first summarization request was rejected in all 18 `client_drop` runs (`tool_use` blocks in a user message), and fell back to a text-only summary. That is why its summarizer read less than half the input of a native compaction (889 against about 2,000 tokens): tool content never reached it. See the summarizer bug noted on PR #5287.
+- **Native compaction keeps preserved thinking valid.** No native run hit a 400 or dropped a block, before or after the compaction block.
+- **A cheaper `aux_model` can compact.** Haiku 5.5 compacted Opus 5.5's history in 18 of 18 runs with similar summary quality, at $0.10 against $4.00 per million input tokens. One Haiku summary invented a "Corrections" section.
+- **Client-side summaries are as good but lose the reasoning.** Every `client_drop` run hit a binding 400, and `drop_block` discarded 80% of pre-compaction thinking (72 of 90). The agent then produced 31% more output after compaction (938 against 716 tokens), consistent with regenerating lost reasoning; 8% more over the whole run.
+- **Native compaction works on Bedrock**, although Anthropic's docs list it as unavailable there.
+- **The client-side summarizer request is malformed.** Its first request failed in all 18 runs (`tool_use` blocks in a user message) and fell back to text only, so tool content never reached it. See PR #5287.
 
-**Limits.** The conversations are short (about 20k input tokens summed across all of a run's requests), and each compacts only once. The recall and reasoning probes scored 1.00 in every arm, partly because the preserved tail restates many of the facts, so they don't separate the arms. Haiku's lower fact score comes from one scenario where the agent found the invoice record only after the cut, so those facts were never in the summarized messages. Prompt caching was off (no `cache_config` on either model), so every request reports zero cache reads and writes, and cache behavior is unmeasured. Native compaction reports its token usage in `usage.iterations` rather than the top-level `usage` fields; the token rows above include it. The run doesn't measure the direct Claude API, other model pairs, or repeated compaction.
+**Limits.** Short conversations (~20k input tokens per run) with one compaction each. The probes scored 1.00 everywhere, partly because the preserved tail restates facts, so they don't separate the arms. Prompt caching was off. Not measured: the direct Claude API, other model pairs, repeated compaction.
 
 </details>
 
@@ -791,15 +775,9 @@ This eval tests three things on longer conversations: whether detail survives re
 | `native_instructions` | `native_rare` plus `Offload.summarize("*", {"system_prompt": INSTRUCTIONS})`, sent as `compaction.instructions` | before turns 14 and 26 |
 | `client_drop` | client-side summary by an Opus 5.5 `aux_model`, then the SDK's `drop_block` retry | before turns 14 and 26 |
 
-**Setup.** The main agent is Opus 5.5 with adaptive thinking at effort `high`, with prompt caching on through `cache_config`. Each of 4 scripted 28-turn scenarios plants 9–13 facts through `lookup` calls in turns 2–5, with unusual identifiers chosen so they can't match by chance. Turns 6–25 are filler work: checks, searches, notes and reasoning turns. They never restate the facts, and the agent has a `save_note` tool that is tempting to call while summarizing. Turns 26–28 are a recall probe, a numeric reasoning probe and a follow-up. Compaction runs on a fixed schedule with `preserve_recent=3`, so the arms are comparable. Native arms set `thinking.block_binding.prefix_mismatch_behavior: "error"`, and every request carries `thinking-binding-controls-2026-08-01`. `INSTRUCTIONS` asks the summarizer to preserve every identifier, number, path, decision, error and open request verbatim, not to call tools, and to output only the summary. 3 reps per scenario, 48 runs and 132 compactions in total.
+**Setup.** Opus 5.5 main agent, adaptive thinking at effort `high`, prompt caching on. 4 scripted 28-turn scenarios plant 9–13 facts through `lookup` calls in turns 2–5; turns 6–25 are filler that never restates them; turns 26–28 are a recall probe, a reasoning probe and a follow-up. Compaction runs on a fixed schedule with `preserve_recent=3`. `INSTRUCTIONS` asks the summarizer to keep identifiers, numbers and open requests verbatim and not to call tools. 3 reps, 48 runs, 132 compactions.
 
-**What a fact is.** A fact is a value that appears only in a `lookup` result. For example, in the debugging scenario, turn 3 looks up `deploy:ledger-reconciler-blue`, whose record holds the build id `build-20261013-amberfox`. No later prompt mentions it. After each compaction, the eval checks whether the summary text still contains the value: case-insensitively, ignoring `,` and `$`, and not as part of a longer token. Each fact lists its accepted spellings, for example `18.40` or `18.4`. In one `native_frequent` run the build id is in all five summaries, each time on the same line as the other deploy fields:
-
-```
-- `deploy:ledger-reconciler-blue`: build `build-20261013-amberfox`, feature_flag `recon.batch_window_v2`, batch_window_s 450
-```
-
-A fact that has been through *n* compactions is one that was in the summarized messages *n* times: once as part of the original turns, then inside each prior summary. The recall probe asks for all the facts from memory, without tools, after the last compaction. Each fact is also checked against the messages kept verbatim, so recall can be attributed to the summary rather than the preserved tail.
+A **fact** is a value that appears only in a `lookup` result, such as the build id `build-20261013-amberfox`. After each compaction the eval checks that the summary still contains it, so a fact surviving five compactions has been re-summarized five times.
 
 | | `native_frequent` | `native_rare` | `native_instructions` | `client_drop` |
 |---|---|---|---|---|
@@ -815,19 +793,19 @@ A fact that has been through *n* compactions is one that was in the summarized m
 | Cost per run, main agent / compaction or summarizer | $0.74 / $0.24 | $0.75 / $0.10 | $0.76 / $0.18 | $0.75 / $0.19 |
 | Main-agent input read from cache | 85% | 92% | 92% | 92% |
 
-Costs use Claude API prices; Bedrock pricing may differ. Token counts use `usage.iterations` when present and the top-level fields otherwise, never both. Thinking counts are unique blocks; counted per request, `client_drop` dropped 300 of 312 replays. The judge is Sonnet 5.5, scoring each summary against the messages it replaced, including any prior summary.
+Costs use Claude API prices. Cache share is cache reads over all main-agent input tokens, excluding compaction calls. The judge is Sonnet 5.5.
 
 **Findings.**
 
-- **Detail survived repeated compaction.** Each native compaction after the first summarized a history that already opened with a compaction block, and all of them succeeded. Every planted fact was still in the summary after 1, 2, 3, 4 and 5 compactions. The judge's completeness score fell from 5.0 to 4.25 across `native_frequent`'s five compactions while faithfulness held: summaries dropped filler detail, not the facts. Compacting five times instead of twice cost $0.14 more per run, and the main agent's cache share fell from 92% to 85%, because each compaction starts a new cache prefix.
-- **The summarizer didn't call tools.** None of the 108 native compaction calls returned `tool_use`, with or without `instructions`, even though `save_note`, `search` and `retrieve_context` were in the request.
-- **Custom `instructions` made summaries longer, not better.** With the instructions, summaries were about 1.8 times longer and took 1.7 times as long to produce. They copied record fields verbatim, but the judge score barely moved (0.95 against 0.93), and fact recall was already at ceiling.
-- **Native compaction is cheaper per compaction.** It reads the conversation's cached prefix: 90–95% of a compaction call's input was a cache read. The client-side summarizer sends a fresh, uncached request, and `native_rare` spent about half as much on compaction as `client_drop` ($0.10 against $0.19 per run).
-- **Client-side summaries lose the preserved tail's thinking at every compaction.** With `preserve_recent=3`, that is one thinking block per compaction, so 24 of 24. Only the first compaction surfaced a binding 400; after it, the SDK keeps `drop_block` on, and later losses are silent. Output after compaction didn't measurably change (427 ± 1,982 more tokens per run than `native_rare`).
-- **The client-side path didn't keep its preserved tail.** At the last compaction it kept only the first message, its summary marker and the new prompt, because the tool-use/result pair logic widened the cut past `preserve_recent=3`. The newest exchange was then summarized, and in 12 of 12 runs the summary listed the already-answered request as still pending. That is the drop in its judge score.
-- **The client-side summarizer request is still malformed.** Its first request was rejected at all 24 client-side compactions (`tool_use` blocks in a user message), then fell back to text only.
+- **Facts survived repeated compaction.** Every native compaction over an existing compaction block succeeded, and every planted fact was still in the summary after five compactions. Completeness fell slightly (5.0 to 4.25) as summaries shed filler. Compacting five times instead of twice cost $0.14 more per run and cut the cache share from 92% to 85%, since each compaction starts a new cache prefix.
+- **The summarizer never called tools** in 108 native compaction calls, even with tools in the request.
+- **Custom `instructions` made summaries 1.8× longer and 1.7× slower, not better** (judge 0.95 against 0.93).
+- **Native compaction costs about half as much** ($0.10 against $0.19 per run): 90–95% of its input is a cache read of the conversation prefix. The client-side summarizer request has a different prefix, so it can't reuse that cache (and `aux_model` had caching off here).
+- **Client-side summaries silently drop the tail's thinking at every compaction** (24 of 24). Only the first compaction surfaces a 400; after that `drop_block` stays on.
+- **The client-side path summarized the newest exchange.** Tool-use/result pairing widened the cut past `preserve_recent=3`, and in 12 of 12 runs the summary listed an answered request as still pending, which explains its lower judge score.
+- **The client-side summarizer request is still malformed**, rejected at all 24 compactions before falling back to text only.
 
-**Limits.** Fact recall and the recall probe are at ceiling in every arm. The conversations reach about 20k tokens of history, small enough that a 7–12k-character summary can keep everything, so these runs don't show where summaries start to lose facts. The reasoning probe tests reasoning in only 2 of 4 scenarios; in the other two the agent had computed the answer earlier, and it was in the summary. One `procurement` run's lookup failed on an ambiguous key, so two of its facts were never planted; it is excluded from fact and probe scores. Results are for Opus 5.5 on Bedrock with one fixed instruction string. The run doesn't measure the direct Claude API, other models, threshold-triggered compaction, or conversations long enough to stress the summary.
+**Limits.** Fact recall is at ceiling in every arm: ~20k tokens of history fits in a 7–12k-character summary, so these runs don't show where summaries start losing facts. The reasoning probe is a real test in only 2 of 4 scenarios. One run with two unplanted facts is excluded from fact scores. Not measured: the direct Claude API, other models, threshold-triggered compaction, longer conversations.
 
 </details>
 
