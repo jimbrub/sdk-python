@@ -118,6 +118,7 @@ _CONTEXT_WINDOW_LIMITS: dict[str, int] = {
     "mistral.mistral-small-2402-v1:0": 32_000,
     "mistral.mistral-large-2402-v1:0": 32_000,
     # OpenAI
+    "chat-latest": 272_000,  # rolling alias for the current ChatGPT model: input budget (400k - 128k out); may change
     "gpt-6-astra": 1_050_000,
     "gpt-6.1-sol": 1_050_000,
     "gpt-6-sol": 1_050_000,

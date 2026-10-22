@@ -32,6 +32,7 @@ describe('getContextWindowLimit', () => {
     expect(getContextWindowLimit('us.mistral.mistral-large-3-675b-instruct')).toBe(256_000)
     expect(getContextWindowLimit('global.mistral.mistral-large-3-675b-instruct')).toBe(256_000)
     // OpenAI
+    expect(getContextWindowLimit('chat-latest')).toBe(272_000)
     expect(getContextWindowLimit('gpt-6-astra')).toBe(1_050_000)
     expect(getContextWindowLimit('gpt-6.1-sol')).toBe(1_050_000)
     expect(getContextWindowLimit('gpt-6-sol')).toBe(1_050_000)
