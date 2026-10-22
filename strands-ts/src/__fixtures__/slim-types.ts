@@ -9,7 +9,6 @@ import type {
   TextBlock,
   ToolUseBlock,
   ReasoningBlock,
-  CompactionBlock,
   CachePointBlock,
   GuardContentBlock,
   JsonBlock,
@@ -38,7 +37,6 @@ export type PlainContentBlock =
   | NoJSON<ToolUseBlock>
   | NoJSON<ToolResultBlock>
   | NoJSON<ReasoningBlock>
-  | NoJSON<CompactionBlock>
   | NoJSON<CachePointBlock>
   | NoJSON<GuardContentBlock>
   | NoJSON<JsonBlock>

@@ -167,6 +167,21 @@ describe('Offload.truncate', () => {
     expect(block.text).toContain('[Truncated:')
   })
 
+  it('skips text blocks that carry providerData', async () => {
+    const summary = new TextBlock('x'.repeat(2500 * 4 + 100), {
+      provider: 'anthropic',
+      data: { type: 'compaction', signature: 'sig' },
+    })
+    const message = new Message({ role: 'assistant', content: [summary] })
+    const strategy = Offload.truncate('assistantText')
+    const context = makeContext([message])
+
+    const result = await strategy.apply(context)
+
+    expect(result).toBe(false)
+    expect(message.content[0]).toBe(summary)
+  })
+
   it('truncates user text blocks with userText target', async () => {
     const largeText = 'x'.repeat(2500 * 4 + 100)
     const message = new Message({

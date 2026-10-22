@@ -11,7 +11,6 @@ import {
   ToolUseBlock,
   CachePointBlock,
   ReasoningBlock,
-  CompactionBlock,
 } from '../../../types/messages.js'
 import type { ContentBlock } from '../../../types/messages.js'
 import type { InvocationContext } from '../../../agent/invocation-context.js'
@@ -444,8 +443,11 @@ export abstract class BaseOffloadStrategy implements ContextStrategy {
     if (block instanceof ToolUseBlock) return false
     if (block instanceof CachePointBlock) return false
     if (block instanceof ReasoningBlock) return false
-    if (block instanceof CompactionBlock) return false
-    if (block instanceof TextBlock) return targetMatchesMessage(this._target, message)
+    if (block instanceof TextBlock) {
+      // A block with providerData is round-tripped verbatim; editing it breaks the provider's signature.
+      if (block.providerData !== undefined) return false
+      return targetMatchesMessage(this._target, message)
+    }
     if (block instanceof ToolResultBlock) {
       if (this._stash && toolNameMap.get(block.toolUseId) === RETRIEVAL_TOOL_NAME) return false
       return (

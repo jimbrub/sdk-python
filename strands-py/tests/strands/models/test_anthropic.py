@@ -1771,7 +1771,12 @@ class TestCompact:
         assert result is not None
         assert result[0] == {
             "role": "assistant",
-            "content": [{"compaction": {"content": "summary", "signature": "sig"}}],
+            "content": [
+                {
+                    "text": "summary",
+                    "providerData": {"provider": "anthropic", "data": {"type": "compaction", "signature": "sig"}},
+                }
+            ],
         }
         assert result[1:] == messages[2:]
 
@@ -1807,7 +1812,37 @@ class TestCompact:
 
         result = await model_with_client.compact(messages, preserved_messages=1)
 
-        assert result[0]["content"][0]["compaction"]["encryptedContent"] == "opaque"
+        assert result[0]["content"][0]["providerData"]["data"]["encrypted_content"] == "opaque"
+
+    def test_formats_compaction_summary_as_signed_compaction_block(self, model):
+        message = {
+            "role": "assistant",
+            "content": [
+                {
+                    "text": "summary",
+                    "providerData": {
+                        "provider": "anthropic",
+                        "data": {"type": "compaction", "signature": "sig", "encrypted_content": "opaque"},
+                    },
+                }
+            ],
+        }
+
+        request = model.format_request([message])
+
+        assert request["messages"][0]["content"] == [
+            {"type": "compaction", "signature": "sig", "encrypted_content": "opaque", "content": "summary"}
+        ]
+
+    def test_formats_text_with_another_providers_data_as_plain_text(self, model):
+        message = {
+            "role": "assistant",
+            "content": [{"text": "summary", "providerData": {"provider": "other", "data": {"type": "compaction"}}}],
+        }
+
+        request = model.format_request([message])
+
+        assert request["messages"][0]["content"] == [{"type": "text", "text": "summary"}]
 
     @pytest.mark.asyncio
     async def test_returns_none_when_provider_reports_failed_compaction(
@@ -1835,7 +1870,15 @@ class TestCompact:
         self, model_with_client, anthropic_client
     ):
         compacted_with_tool_turn = [
-            {"role": "assistant", "content": [{"compaction": {"content": "summary", "signature": "sig"}}]},
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "text": "summary",
+                        "providerData": {"provider": "anthropic", "data": {"type": "compaction", "signature": "sig"}},
+                    }
+                ],
+            },
             {"role": "user", "content": [{"text": "count words"}]},
             {"role": "assistant", "content": [{"toolUse": {"toolUseId": "t1", "name": "word_count", "input": {}}}]},
             {"role": "user", "content": [{"toolResult": {"toolUseId": "t1", "status": "success", "content": []}}]},

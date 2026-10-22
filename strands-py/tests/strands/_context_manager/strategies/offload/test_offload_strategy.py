@@ -821,6 +821,17 @@ class TestTransformBlocks:
         assert "reasoningContent" in message["content"][0]
 
     @pytest.mark.asyncio
+    async def test_skips_text_block_with_provider_data(self, mock_agent):
+        strategy = Offload.truncate("*", {"preview_tokens": 1}).when(threshold=2)
+        summary_block = ContentBlock(
+            text="summary " * 200,
+            providerData={"provider": "anthropic", "data": {"type": "compaction", "signature": "sig"}},
+        )
+        message = Message(role="assistant", content=[summary_block])
+        assert await strategy._transform_blocks(message, [message], {}, mock_agent) is False
+        assert message["content"][0] is summary_block
+
+    @pytest.mark.asyncio
     async def test_skips_cache_point_block(self, mock_agent):
         strategy = Offload.drop("*").when(threshold=100)
         cache_block = ContentBlock(cachePoint={"type": "default"})

@@ -425,7 +425,8 @@ class BaseOffloadStrategy(ABC):
         """Check whether a block is eligible for offload given target and filters."""
         if is_tool_use_block(block):
             return False
-        if "reasoningContent" in block or "cachePoint" in block:
+        # A block with providerData is round-tripped verbatim; editing it breaks the provider's signature.
+        if "reasoningContent" in block or "cachePoint" in block or "providerData" in block:
             return False
         if is_text_block(block):
             return _target_matches_message(self._target, message)

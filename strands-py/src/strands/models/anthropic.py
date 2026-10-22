@@ -29,7 +29,7 @@ from ..types.citations import (
     WebLocation,
     WebLocationDict,
 )
-from ..types.content import CompactionContentBlock, ContentBlock, Message, Messages, SystemContentBlock
+from ..types.content import ContentBlock, Message, Messages, SystemContentBlock
 from ..types.event_loop import Usage
 from ..types.exceptions import ContextWindowOverflowException, ModelThrottledException
 from ..types.streaming import CitationsDelta, StreamEvent
@@ -130,9 +130,20 @@ def _with_native_output(
     return {**request, "tool_choice": {"type": "none"}, "output_config": output_config}
 
 
+# `ProviderData.provider` value for payloads only this provider reads.
+_PROVIDER = "anthropic"
+
 # Beta identifier required to send the top-level `compaction` request parameter.
 # https://platform.claude.com/docs/en/build-with-claude/compaction-keep-recent-turns
 _COMPACT_BETA = "compact-2026-09-04"
+
+
+def _is_compaction(block: ContentBlock) -> bool:
+    """Whether ``block`` is a summary text block carrying an Anthropic compaction payload."""
+    provider_data = block.get("providerData")
+    if "text" not in block or provider_data is None or provider_data["provider"] != _PROVIDER:
+        return False
+    return provider_data["data"].get("type") == "compaction"
 
 
 def _compaction_split(messages: Messages, preserved_messages: int | float) -> int:
@@ -162,7 +173,7 @@ def _compaction_split(messages: Messages, preserved_messages: int | float) -> in
     if split == 0 and any(0 < index <= cut for index in prompt_indexes):
         # The compaction block must open the history, so nothing can be kept verbatim ahead of it.
         logger.warning("pinned_index=<%d> | pinned message precedes every cut point, skipping native compaction", end)
-    if split == 1 and all("compaction" in block for block in messages[0]["content"]):
+    if split == 1 and all(_is_compaction(block) for block in messages[0]["content"]):
         return 0
     return split
 
@@ -340,16 +351,9 @@ class AnthropicModel(Model):
             # Anthropic rejects reasoning text without a signature, which is how other model families emit it.
             return None
 
-        if "compaction" in content:
-            compaction = content["compaction"]
-            formatted: dict[str, Any] = {"type": "compaction"}
-            if "content" in compaction:
-                formatted["content"] = compaction["content"]
-            if "signature" in compaction:
-                formatted["signature"] = compaction["signature"]
-            if "encryptedContent" in compaction:
-                formatted["encrypted_content"] = compaction["encryptedContent"]
-            return formatted
+        if _is_compaction(content):
+            # A native compaction summary: the text plus the signed fields Anthropic returned with it.
+            return {**content["providerData"]["data"], "content": content["text"]}
 
         if "text" in content:
             return {"text": content["text"], "type": "text"}
@@ -1117,11 +1121,15 @@ class AnthropicModel(Model):
             )
             return None
 
-        compaction_block: CompactionContentBlock = {"content": block.content, "signature": block.signature}
+        # The summary is ordinary text; the signed fields ride along for this provider to send back.
+        data: dict[str, Any] = {"type": "compaction", "signature": block.signature}
         if getattr(block, "encrypted_content", None):
-            compaction_block["encryptedContent"] = block.encrypted_content
+            data["encrypted_content"] = block.encrypted_content
 
-        summary_message: Message = {"role": "assistant", "content": [{"compaction": compaction_block}]}
+        summary_message: Message = {
+            "role": "assistant",
+            "content": [{"text": block.content, "providerData": {"provider": _PROVIDER, "data": data}}],
+        }
         logger.debug(
             "model_id=<%s>, compacted=<%d>, preserved=<%d> | native compaction complete",
             self.config["model_id"],

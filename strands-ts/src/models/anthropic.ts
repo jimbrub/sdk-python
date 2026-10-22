@@ -10,9 +10,10 @@ import {
   type ResolvedCacheSection,
 } from '../models/model.js'
 import { THINKING_BINDING_BETA, isThinkingBindingError, thinkingWithDropBlock } from './thinking-binding.js'
-import type { ContentBlock, SystemPrompt } from '../types/messages.js'
+import type { ContentBlock, ProviderData, SystemPrompt } from '../types/messages.js'
 import type { ToolSpec } from '../tools/types.js'
-import { Message, CompactionBlock } from '../types/messages.js'
+import type { JSONValue } from '../types/json.js'
+import { Message, TextBlock } from '../types/messages.js'
 import type { ModelStreamEvent } from '../models/streaming.js'
 import { createEmptyUsage } from '../models/streaming.js'
 import { ContextWindowOverflowError, ModelError, ModelThrottledError, normalizeError } from '../errors.js'
@@ -65,6 +66,18 @@ const TEXT_FILE_FORMATS = ['txt', 'md', 'markdown', 'csv', 'json', 'xml', 'html'
 // https://platform.claude.com/docs/en/build-with-claude/compaction-keep-recent-turns
 const COMPACT_BETA = 'compact-2026-09-04'
 
+// `ProviderData.provider` value for payloads only this provider reads.
+const PROVIDER = 'anthropic'
+
+/** Whether `block` is a summary text block carrying an Anthropic compaction payload. */
+function isCompaction(block: ContentBlock): block is TextBlock & { providerData: ProviderData } {
+  return (
+    block.type === 'textBlock' &&
+    block.providerData?.provider === PROVIDER &&
+    block.providerData.data.type === 'compaction'
+  )
+}
+
 /**
  * Picks the index that starts the preserved tail for `AnthropicModel.compact`.
  *
@@ -103,7 +116,7 @@ function compactionSplitIndex(messages: Message[], preservedMessages: number): n
     // The compaction block must open the history, so nothing can be kept verbatim ahead of it.
     logger.warn(`pinned_index=<${end}> | pinned message precedes every cut point, skipping native compaction`)
   }
-  if (split === 1 && messages[0]!.content.every((block) => block.type === 'compactionBlock')) return 0
+  if (split === 1 && messages[0]!.content.every(isCompaction)) return 0
   return split
 }
 
@@ -388,15 +401,15 @@ export class AnthropicModel extends Model<AnthropicModelConfig> {
       return undefined
     }
 
+    // The summary is ordinary text; the signed fields ride along for this provider to send back.
+    const data: Record<string, JSONValue> = {
+      type: 'compaction',
+      ...(block.signature !== undefined && { signature: block.signature }),
+      ...(block.encrypted_content !== undefined && { encrypted_content: block.encrypted_content }),
+    }
     const summaryMessage = new Message({
       role: 'assistant',
-      content: [
-        new CompactionBlock({
-          content: block.content,
-          ...(block.signature !== undefined && { signature: block.signature }),
-          ...(block.encrypted_content !== undefined && { encryptedContent: block.encrypted_content }),
-        }),
-      ],
+      content: [new TextBlock(block.content, { provider: PROVIDER, data })],
     })
 
     logger.debug(
@@ -930,6 +943,10 @@ export class AnthropicModel extends Model<AnthropicModelConfig> {
   ): Anthropic.ContentBlockParam | Anthropic.ToolResultBlockParam | undefined {
     switch (block.type) {
       case 'textBlock':
+        if (isCompaction(block)) {
+          // A native compaction summary: the text plus the signed fields Anthropic returned with it.
+          return { ...block.providerData.data, content: block.text } as unknown as Anthropic.ContentBlockParam
+        }
         return { type: 'text', text: block.text }
 
       case 'imageBlock': {
@@ -1086,14 +1103,6 @@ export class AnthropicModel extends Model<AnthropicModelConfig> {
 
       case 'cachePointBlock':
         return undefined
-
-      case 'compactionBlock':
-        return {
-          type: 'compaction',
-          ...(block.content !== undefined && { content: block.content }),
-          ...(block.signature !== undefined && { signature: block.signature }),
-          ...(block.encryptedContent !== undefined && { encrypted_content: block.encryptedContent }),
-        } as unknown as Anthropic.ContentBlockParam
 
       default:
         return undefined

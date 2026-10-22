@@ -12,7 +12,6 @@ import {
   ToolResultBlock,
   JsonBlock,
   ReasoningBlock,
-  CompactionBlock,
   ToolUseBlock,
 } from '../../types/messages.js'
 import { ImageBlock, DocumentBlock, VideoBlock } from '../../types/media.js'
@@ -1398,8 +1397,60 @@ describe('AnthropicModel', () => {
 
       expect(result).toBeDefined()
       expect(result![0]!.role).toBe('assistant')
-      expect((result![0]!.content[0] as unknown as { content: string; signature: string }).content).toBe('summary')
+      expect(result![0]!.content[0]).toEqual(
+        new TextBlock('summary', { provider: 'anthropic', data: { type: 'compaction', signature: 'sig' } })
+      )
       expect(result!.slice(1)).toEqual(messages.slice(2))
+    })
+
+    it('sends a restored compaction summary back as a signed compaction block', async () => {
+      const summary = new Message({
+        role: 'assistant',
+        content: [
+          new TextBlock('summary', {
+            provider: 'anthropic',
+            data: { type: 'compaction', signature: 'sig', encrypted_content: 'opaque' },
+          }),
+        ],
+      })
+      const restored = Message.fromJSON(JSON.parse(JSON.stringify(summary)))
+      const captured: { request: any } = { request: null }
+      const captureClient = {
+        messages: {
+          stream: vi.fn((req: any) => {
+            captured.request = req
+            return (async function* () {
+              yield { type: 'ping' }
+            })()
+          }),
+        },
+      } as unknown as Anthropic
+      await collectIterator(new AnthropicModel({ client: captureClient }).stream([restored]))
+
+      expect(captured.request.messages[0].content).toEqual([
+        { type: 'compaction', signature: 'sig', encrypted_content: 'opaque', content: 'summary' },
+      ])
+    })
+
+    it("sends text carrying another provider's data as plain text", async () => {
+      const message = new Message({
+        role: 'assistant',
+        content: [new TextBlock('summary', { provider: 'other', data: { type: 'compaction' } })],
+      })
+      const captured: { request: any } = { request: null }
+      const captureClient = {
+        messages: {
+          stream: vi.fn((req: any) => {
+            captured.request = req
+            return (async function* () {
+              yield { type: 'ping' }
+            })()
+          }),
+        },
+      } as unknown as Anthropic
+      await collectIterator(new AnthropicModel({ client: captureClient }).stream([message]))
+
+      expect(captured.request.messages[0].content).toEqual([{ type: 'text', text: 'summary' }])
     })
 
     it('sends the compaction param and beta header, sending only the older messages', async () => {
@@ -1461,7 +1512,12 @@ describe('AnthropicModel', () => {
       const client = createCompactClient(mockCreate)
       const model = new AnthropicModel({ client, modelId: 'claude-sonnet-4-6' })
       const messages = [
-        new Message({ role: 'assistant', content: [new CompactionBlock({ content: 'summary', signature: 'sig' })] }),
+        new Message({
+          role: 'assistant',
+          content: [
+            new TextBlock('summary', { provider: 'anthropic', data: { type: 'compaction', signature: 'sig' } }),
+          ],
+        }),
         new Message({ role: 'user', content: [new TextBlock('count words')] }),
         new Message({
           role: 'assistant',

@@ -180,7 +180,6 @@ export type ContentBlockData =
   | { toolUse: ToolUseBlockData }
   | { toolResult: ToolResultBlockData }
   | { reasoning: ReasoningBlockData }
-  | { compaction: CompactionBlockData }
   | { cachePoint: CachePointBlockData }
   | { guardContent: GuardContentBlockData }
   | { audio: AudioBlockData }
@@ -194,7 +193,6 @@ export type ContentBlock =
   | ToolUseBlock
   | ToolResultBlock
   | ReasoningBlock
-  | CompactionBlock
   | CachePointBlock
   | GuardContentBlock
   | AudioBlock
@@ -204,6 +202,24 @@ export type ContentBlock =
   | CitationsBlock
 
 /**
+ * Opaque provider state bound to the content block that carries it.
+ *
+ * Only the provider named by `provider` reads `data`; every other provider ignores it and sends
+ * the block as usual. Round-tripped verbatim, so a block carrying it must not be edited.
+ */
+export interface ProviderData {
+  /**
+   * The provider that produced `data`, such as `'anthropic'`.
+   */
+  provider: string
+
+  /**
+   * Provider-defined payload, sent back unchanged.
+   */
+  data: Record<string, JSONValue>
+}
+
+/**
  * Data for a text block.
  */
 export interface TextBlockData {
@@ -211,6 +227,11 @@ export interface TextBlockData {
    * Plain text content.
    */
   text: string
+
+  /**
+   * Opaque provider state bound to `text`.
+   */
+  providerData?: ProviderData
 }
 
 /**
@@ -227,8 +248,16 @@ export class TextBlock implements TextBlockData, JSONSerializable<TextBlockData>
    */
   readonly text: string
 
-  constructor(data: string) {
+  /**
+   * Opaque provider state bound to `text`.
+   */
+  readonly providerData?: ProviderData
+
+  constructor(data: string, providerData?: ProviderData) {
     this.text = data
+    if (providerData !== undefined) {
+      this.providerData = providerData
+    }
   }
 
   /**
@@ -236,7 +265,7 @@ export class TextBlock implements TextBlockData, JSONSerializable<TextBlockData>
    * Called automatically by JSON.stringify().
    */
   toJSON(): TextBlockData {
-    return { text: this.text }
+    return { text: this.text, ...(this.providerData !== undefined && { providerData: this.providerData }) }
   }
 
   /**
@@ -246,7 +275,7 @@ export class TextBlock implements TextBlockData, JSONSerializable<TextBlockData>
    * @returns TextBlock instance
    */
   static fromJSON(data: TextBlockData): TextBlock {
-    return new TextBlock(data.text)
+    return new TextBlock(data.text, data.providerData)
   }
 }
 
@@ -568,107 +597,6 @@ export class ReasoningBlock
           : reasoning.redactedContent
     }
     return new ReasoningBlock(result)
-  }
-}
-
-/**
- * Data for a compaction block: a provider-generated summary that replaces a prefix of the
- * conversation. Produced by `Model.compact` (currently only `AnthropicModel`, see
- * `team/designs/0022-server-side-compaction-support.md`) for providers whose preserved-thinking blocks
- * are bound to the exact history prefix that produced them, so a client-side summary would
- * invalidate any thinking block kept after it. Always round-tripped verbatim — Strands never edits
- * a CompactionBlock it didn't just receive from `Model.compact`.
- */
-export interface CompactionBlockData {
-  /**
-   * Provider-generated summary of the conversation prefix this block replaces, or `undefined`
-   * when the provider reports the compaction attempt failed.
-   */
-  content?: string
-
-  /**
-   * Provider signature binding the summary to the history it was generated from.
-   * Must be sent back unchanged.
-   */
-  signature?: string
-
-  /**
-   * Opaque provider metadata from a prior compaction. Round-tripped verbatim; never inspected.
-   */
-  encryptedContent?: string
-}
-
-/**
- * Compaction content block within a message.
- */
-export class CompactionBlock
-  implements CompactionBlockData, JSONSerializable<{ compaction: Serialized<CompactionBlockData> }>
-{
-  /**
-   * Discriminator for compaction content.
-   */
-  readonly type = 'compactionBlock' as const
-
-  /**
-   * Provider-generated summary of the conversation prefix this block replaces.
-   */
-  readonly content?: string
-
-  /**
-   * Provider signature binding the summary to the history it was generated from.
-   */
-  readonly signature?: string
-
-  /**
-   * Opaque provider metadata from a prior compaction.
-   */
-  readonly encryptedContent?: string
-
-  constructor(data: CompactionBlockData) {
-    if (data.content !== undefined) {
-      this.content = data.content
-    }
-    if (data.signature !== undefined) {
-      this.signature = data.signature
-    }
-    if (data.encryptedContent !== undefined) {
-      this.encryptedContent = data.encryptedContent
-    }
-  }
-
-  /**
-   * Serializes the CompactionBlock to a JSON-compatible ContentBlockData object.
-   * Called automatically by JSON.stringify().
-   */
-  toJSON(): { compaction: Serialized<CompactionBlockData> } {
-    return {
-      compaction: omitUndefined({
-        content: this.content,
-        signature: this.signature,
-        encryptedContent: this.encryptedContent,
-      }),
-    }
-  }
-
-  /**
-   * Creates a CompactionBlock instance from its wrapped data format.
-   *
-   * @param data - Wrapped CompactionBlockData to deserialize
-   * @returns CompactionBlock instance
-   */
-  static fromJSON(data: { compaction: MaybeSerializedInput<CompactionBlockData> }): CompactionBlock {
-    const compaction = data.compaction
-    const result: CompactionBlockData = {}
-    if (compaction.content !== undefined) {
-      result.content = compaction.content
-    }
-    if (compaction.signature !== undefined) {
-      result.signature = compaction.signature
-    }
-    if (compaction.encryptedContent !== undefined) {
-      result.encryptedContent = compaction.encryptedContent
-    }
-    return new CompactionBlock(result)
   }
 }
 
@@ -1095,15 +1023,13 @@ export class GuardContentBlock
  */
 export function contentBlockFromData(data: ContentBlockData): ContentBlock {
   if ('text' in data) {
-    return new TextBlock(data.text)
+    return TextBlock.fromJSON(data)
   } else if ('toolUse' in data) {
     return new ToolUseBlock(data.toolUse)
   } else if ('toolResult' in data) {
     return ToolResultBlock.fromJSON(data)
   } else if ('reasoning' in data) {
     return ReasoningBlock.fromJSON(data)
-  } else if ('compaction' in data) {
-    return CompactionBlock.fromJSON(data)
   } else if ('cachePoint' in data) {
     return CachePointBlock.fromJSON(data)
   } else if ('guardContent' in data) {

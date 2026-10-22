@@ -77,27 +77,19 @@ class CachePoint(TypedDict):
     ttl: NotRequired[str]
 
 
-class CompactionContentBlock(TypedDict, total=False):
-    """A provider-generated summary that replaces a prefix of the conversation.
+class ProviderData(TypedDict):
+    """Opaque provider state bound to the content block that carries it.
 
-    Produced by ``Model.compact`` (currently only ``AnthropicModel``, see
-    ``team/designs/0022-server-side-compaction-support.md``) for providers whose preserved-thinking
-    blocks are bound to the exact history prefix that produced them, so a client-side summary
-    would invalidate any thinking block kept after it. Strands never edits a block of this type;
-    it is always round-tripped verbatim between a `Model.compact` response and the next request.
+    Only the provider named by ``provider`` reads ``data``; every other provider ignores it and
+    sends the block as usual. Round-tripped verbatim, so a block carrying it must not be edited.
 
     Attributes:
-        content: Provider-generated summary of the conversation prefix this block replaces, or
-            unset/``None`` when the provider reports the compaction attempt failed.
-        signature: Provider signature binding the summary to the history it was generated from.
-            Must be sent back unchanged.
-        encryptedContent: Opaque provider metadata from a prior compaction. Round-tripped
-            verbatim; never inspected.
+        provider: The provider that produced ``data``, such as ``"anthropic"``.
+        data: Provider-defined payload, sent back unchanged.
     """
 
-    content: NotRequired[str | None]
-    signature: NotRequired[str | None]
-    encryptedContent: NotRequired[str | None]
+    provider: str
+    data: dict[str, Any]
 
 
 class ContentBlock(TypedDict, total=False):
@@ -106,7 +98,6 @@ class ContentBlock(TypedDict, total=False):
     Attributes:
         audio: Audio to include in the message.
         cachePoint: A cache point configuration to optimize conversation history.
-        compaction: A provider-generated summary that replaces a prefix of the conversation.
         document: A document to include in the message.
         guardContent: Contains the content to assess with the guardrail.
         image: Image to include in the message.
@@ -116,11 +107,11 @@ class ContentBlock(TypedDict, total=False):
         toolUse: Information about a tool use request from a model.
         video: Video to include in the message.
         citationsContent: Contains the citations for a document.
+        providerData: Opaque provider state bound to this block's ``text``.
     """
 
     audio: AudioContent
     cachePoint: CachePoint
-    compaction: CompactionContentBlock
     document: DocumentContent
     guardContent: GuardContent
     image: ImageContent
@@ -130,6 +121,7 @@ class ContentBlock(TypedDict, total=False):
     toolUse: ToolUse
     video: VideoContent
     citationsContent: CitationsContentBlock
+    providerData: ProviderData
 
 
 class _TextBlockData(TypedDict):
