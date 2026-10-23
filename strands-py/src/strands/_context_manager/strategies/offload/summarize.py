@@ -69,12 +69,12 @@ class SummarizeStrategy(BaseOffloadStrategy):
         """Whether ``preserve_recent``, the only selection ``Model.compact()`` receives, decides what is summarized."""
         return self._target in (None, "*") and self._threshold is None
 
-    async def _compact(self, context: ContextState, model: Model) -> bool:
-        """Replace the history with ``model.compact()``'s result."""
+    async def _compact(self, context: ContextState, model: Model, preserved_messages: int | float) -> bool:
+        """Replace the history with ``model.compact()``'s result, keeping ``preserved_messages`` trailing messages."""
         agent = context.agent
         compacted = await model.compact(
             context.messages,
-            preserved_messages=self._preserve_recent,
+            preserved_messages=preserved_messages,
             # A server-side compaction must carry the live system prompt and tools, or the provider
             # treats it as a different conversation.
             tool_specs=agent.tool_registry.get_all_tool_specs(),
@@ -95,7 +95,7 @@ class SummarizeStrategy(BaseOffloadStrategy):
         if not model:
             return False
         if self._selects_by_recency_only:
-            return await self._compact(context, model)
+            return await self._compact(context, model, self._preserve_recent)
 
         messages = context.messages
         if len(messages) <= 1:
@@ -117,9 +117,14 @@ class SummarizeStrategy(BaseOffloadStrategy):
         if not model or not self._is_retroactive or model.server_compaction is not True:
             return await super()._apply_per_block(context)
 
-        if not await self._get_eligible_messages(context):
+        messages = context.messages
+        eligible = await self._get_eligible_messages(context)
+        if not eligible:
             return False
-        return await self._compact(context, model)
+        # ``preserve_recent`` counts only matching messages, so the cut is set just after the newest eligible one.
+        eligible_ids = {id(message) for message in eligible}
+        newest_eligible = max(index for index, message in enumerate(messages) if id(message) in eligible_ids)
+        return await self._compact(context, model, len(messages) - newest_eligible - 1)
 
     async def _replace_block(
         self,

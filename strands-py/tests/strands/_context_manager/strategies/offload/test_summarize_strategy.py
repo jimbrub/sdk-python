@@ -521,6 +521,7 @@ class TestSummarizeStrategyRouting:
         messages = _routing_history()
         assert await retroactive.apply(ContextState(messages=messages, agent=routing_agent, utilization=0.9)) is True
         routing_agent.model.compact.assert_called_once()
+        assert routing_agent.model.compact.call_args.kwargs["preserved_messages"] == 4
         assert messages == COMPACTED
 
     @pytest.mark.asyncio

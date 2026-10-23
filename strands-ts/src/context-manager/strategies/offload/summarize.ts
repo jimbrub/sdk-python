@@ -54,13 +54,13 @@ export class SummarizeStrategy extends BaseOffloadStrategy {
     return (this._target === undefined || this._target === '*') && this._threshold === undefined
   }
 
-  /** Replaces the history with `model.compact()`'s result. */
-  private async _compact(context: ContextState, model: Model): Promise<boolean> {
+  /** Replaces the history with `model.compact()`'s result, keeping `preservedMessages` trailing messages. */
+  private async _compact(context: ContextState, model: Model, preservedMessages: number): Promise<boolean> {
     const { messages, agent } = context
     const compacted = await model.compact(
       messages,
       {
-        preservedMessages: this._preserveRecent,
+        preservedMessages,
         // A server-side compaction must carry the live system prompt and tools, or the provider
         // treats it as a different conversation.
         ...(agent.systemPrompt !== undefined && { systemPrompt: agent.systemPrompt }),
@@ -78,7 +78,7 @@ export class SummarizeStrategy extends BaseOffloadStrategy {
   protected override async _applyPerMessage(context: ContextState): Promise<boolean> {
     const model = this._resolveModel(context.agent)
     if (!model) return false
-    if (this._selectsByRecencyOnly) return this._compact(context, model)
+    if (this._selectsByRecencyOnly) return this._compact(context, model, this._preserveRecent)
 
     const { messages } = context
     if (messages.length <= 1) return false
@@ -97,9 +97,12 @@ export class SummarizeStrategy extends BaseOffloadStrategy {
     const model = this._resolveModel(context.agent)
     if (!model || !this._isRetroactive || model.serverCompaction !== true) return super._applyPerBlock(context)
 
+    const { messages } = context
     const eligible = await this._getEligibleMessages(context)
     if (eligible.length === 0) return false
-    return this._compact(context, model)
+    // `preserveRecent` counts only matching messages, so the cut is set just after the newest eligible one.
+    const newestEligible = Math.max(...eligible.map((message) => messages.indexOf(message)))
+    return this._compact(context, model, messages.length - newestEligible - 1)
   }
 
   protected async _replaceBlock(

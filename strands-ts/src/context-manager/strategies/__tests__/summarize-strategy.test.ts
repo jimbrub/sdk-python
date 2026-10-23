@@ -476,6 +476,7 @@ describe('routing through Model.compact', () => {
     const messages = makeHistory()
     expect(await retroactive.apply(makeRoutingContext(messages, 0.9, model))).toBe(true)
     expect(received).toHaveLength(1)
+    expect(vi.mocked(model.compact).mock.calls[0]![1]!.preservedMessages).toBe(4)
     expect(messages).toEqual(compacted)
   })
 
