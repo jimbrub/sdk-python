@@ -504,7 +504,60 @@ class TestSummarizeStrategyRouting:
         assert await eager.apply(context) is True
         routing_agent.model.compact.assert_not_called()
 
+        no_tool_results: Messages = [
+            Message(role="user", content=[ContentBlock(text="task")]),
+            Message(role="assistant", content=[ContentBlock(text="a")]),
+            Message(role="user", content=[ContentBlock(text="b")]),
+            Message(role="assistant", content=[ContentBlock(text="c")]),
+        ]
+        context = ContextState(messages=no_tool_results, agent=routing_agent, utilization=0.9)
+        assert await retroactive.apply(context) is False
+        below_threshold = Offload.summarize("tool_results").when(threshold=100_000, preserve_recent=1)
+        context = ContextState(messages=_routing_history(), agent=routing_agent, utilization=0.9)
+        assert await below_threshold.apply(context) is False
+        routing_agent.model.compact.assert_not_called()
+
         messages = _routing_history()
         assert await retroactive.apply(ContextState(messages=messages, agent=routing_agent, utilization=0.9)) is True
         routing_agent.model.compact.assert_called_once()
         assert messages == COMPACTED
+
+    @pytest.mark.asyncio
+    async def test_keeps_a_tool_pair_that_straddles_the_preserve_recent_cut_out_of_the_summary(self, mock_agent):
+        tool_use = Message(
+            role="assistant", content=[ContentBlock(toolUse=ToolUse(toolUseId="tool-1", name="read", input={}))]
+        )
+        tool_result = Message(
+            role="user",
+            content=[
+                ContentBlock(toolResult=ToolResult(toolUseId="tool-1", status="success", content=[{"text": "ok"}]))
+            ],
+        )
+        messages: Messages = [
+            Message(role="user", content=[ContentBlock(text="task")]),
+            Message(role="assistant", content=[ContentBlock(text="a")]),
+            Message(role="user", content=[ContentBlock(text="b")]),
+            tool_use,
+            tool_result,
+            Message(role="assistant", content=[ContentBlock(text="c")]),
+            Message(role="user", content=[ContentBlock(text="latest")]),
+        ]
+        original = list(messages)
+        strategy = Offload.summarize("*").when(utilization=0.7, preserve_recent=3)
+
+        assert await strategy.apply(ContextState(messages=messages, agent=mock_agent, utilization=0.9)) is True
+
+        exp_messages = [
+            original[0],
+            {
+                "role": "assistant",
+                "content": [
+                    *tool_use["content"],
+                    {"text": "[Summarized: 2 messages, ~5,000 tokens]\n\nSummary of content."},
+                ],
+            },
+            tool_result,
+            original[5],
+            original[6],
+        ]
+        assert messages == exp_messages

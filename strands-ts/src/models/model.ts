@@ -30,7 +30,7 @@ import { logger } from '../logging/logger.js'
 import { DEFAULT_CONTEXT_WINDOW_LIMIT, getContextWindowLimit } from './defaults.js'
 import { warnOnce } from '../logging/warn-once.js'
 import { isPinned } from '../conversation-manager/compression/pin-message.js'
-import { summarizeMessages } from '../context-manager/strategies/offload/summarize.js'
+import { summarizeMessages } from '../context-manager/methods/summarize.js'
 import type { InvocationContext } from '../agent/invocation-context.js'
 
 /**

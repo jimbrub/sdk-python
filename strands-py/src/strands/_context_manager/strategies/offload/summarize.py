@@ -5,82 +5,24 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from ....types.content import ContentBlock, Message, Messages
+from ....types.content import ContentBlock, Message
 from ....types.tools import ToolResult, ToolResultContent
 from ...methods.summarize import (
     SummarizeConfig,
-    _flatten_messages_to_content,
     _format_summarized,
     _summarize_content,
+    _summarize_messages,
     _tool_result_to_content_blocks,
 )
 from ...stash import _format_stash_refs
 from ...types import ContextState
-from .base import (
-    BaseOffloadStrategy,
-    OffloadConditions,
-    OffloadTarget,
-    _build_conditions,
-    _collect_removable_with_pair,
-    _insert_marker,
-    _repair_alternation,
-    _splice_with_pairs,
-)
+from .base import BaseOffloadStrategy, OffloadConditions, OffloadTarget, _build_conditions
 
 if TYPE_CHECKING:
     from ....agent.agent import Agent
     from ....models.model import Model
 
 logger = logging.getLogger(__name__)
-
-
-async def _summarize_messages(
-    messages: Messages,
-    eligible: Messages,
-    model: Model,
-    config: SummarizeConfig | None = None,
-) -> bool:
-    """Replace ``eligible`` messages in ``messages`` with one ``[Summarized: ...]`` marker, in place.
-
-    Each eligible message's tool-pair partner is summarized with it; message 0 and the last message never are.
-
-    Args:
-        messages: The history to edit.
-        eligible: Messages in ``messages`` to summarize.
-        model: Model that writes the summary.
-        config: Summarization settings; only ``system_prompt`` is read.
-
-    Returns:
-        Whether any messages were summarized.
-    """
-    identity_map = {id(msg): index for index, msg in enumerate(messages)}
-    safe_ids: set[int] = set()
-    for message in eligible:
-        index = identity_map.get(id(message))
-        if index is None:
-            continue
-        for removable in _collect_removable_with_pair(messages, index):
-            safe_ids.add(id(removable))
-    safe = [msg for msg in messages if id(msg) in safe_ids]
-    if not safe:
-        return False
-
-    content_blocks = _flatten_messages_to_content(safe)
-    summary = await _summarize_content(content_blocks, model, config)
-    if not summary:
-        return False
-
-    total_tokens = await model.count_tokens(safe)
-
-    removed, lowest_index = _splice_with_pairs(messages, safe)
-    if removed == 0:
-        return False
-
-    _insert_marker(messages, lowest_index, _format_summarized(f"{removed} messages", total_tokens, summary))
-
-    _repair_alternation(messages)
-    logger.debug("summarized=<%s>, tokens=<%s> | batched summarization complete", removed, total_tokens)
-    return True
 
 
 class SummarizeStrategy(BaseOffloadStrategy):
@@ -116,16 +58,9 @@ class SummarizeStrategy(BaseOffloadStrategy):
 
     async def apply(self, context: ContextState) -> bool:
         """Apply summarization. Returns False if no model is available."""
-        model = self._resolve_model(context.agent)
-        if not model:
+        if not self._resolve_model(context.agent):
             logger.warning("strategy=<%s> | no model available for summarization", self.name)
             return False
-        if self._is_message_level and self._selects_by_recency_only:
-            if not context.overflow and context.utilization < self._utilization_threshold:  # type: ignore[operator]
-                return False
-            return await self._compact(context, model)
-        if not self._is_message_level and self._is_retroactive and model.server_compaction is True:
-            return await self._compact(context, model)
         return await super().apply(context)
 
     @property
@@ -157,6 +92,8 @@ class SummarizeStrategy(BaseOffloadStrategy):
         model = self._resolve_model(context.agent)
         if not model:
             return False
+        if self._selects_by_recency_only:
+            return await self._compact(context, model)
 
         messages = context.messages
         if len(messages) <= 1:
@@ -167,6 +104,20 @@ class SummarizeStrategy(BaseOffloadStrategy):
             return False
 
         return await _summarize_messages(messages, eligible, model, self._config)
+
+    async def _apply_per_block(self, context: ContextState) -> bool:
+        """Summarize eligible blocks, or compact the history when the model compacts server-side.
+
+        A retroactive per-block summary invalidates later thinking on a model that compacts server-side, so it
+        compacts the history instead, but only when a block it targets is eligible.
+        """
+        model = self._resolve_model(context.agent)
+        if not model or not self._is_retroactive or model.server_compaction is not True:
+            return await super()._apply_per_block(context)
+
+        if not await self._get_eligible_messages(context):
+            return False
+        return await self._compact(context, model)
 
     async def _replace_block(
         self,

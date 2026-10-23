@@ -379,7 +379,7 @@ export abstract class BaseOffloadStrategy implements ContextStrategy {
   }
 
   /** Per-block execution: walk each message, transform individual blocks above threshold. */
-  private async _applyPerBlock(context: ContextState): Promise<boolean> {
+  protected async _applyPerBlock(context: ContextState): Promise<boolean> {
     const { messages, agent } = context
     const invocationContext = context.invocationContext
     const toolNameMap = buildToolNameMap(messages)

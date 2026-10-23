@@ -1313,10 +1313,8 @@ describe('compact', () => {
       messages[6],
     ])
     expect(messages).toEqual(original)
-    expect(streamSpy).toHaveBeenCalledWith(expect.any(Array), expect.objectContaining({ systemPrompt: 'Keep ids' }))
-    expect(invocationContext.usage).toEqual(
-      expect.objectContaining({ inputTokens: 4, outputTokens: 5, totalTokens: 9 })
-    )
+    expect(streamSpy).toHaveBeenCalledWith(expect.any(Array), { systemPrompt: 'Keep ids' })
+    expect(invocationContext.usage).toEqual({ turnsTaken: 0, inputTokens: 4, outputTokens: 5, totalTokens: 9 })
   })
 
   it('returns undefined without a model call when nothing before the cut can be summarized', async () => {

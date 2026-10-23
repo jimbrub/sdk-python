@@ -182,9 +182,9 @@ describe('Offload.summarize', () => {
       const toolResultMessage = makeToolResultMessage(largeText)
       const latest = new Message({ role: 'assistant', content: [new TextBlock('latest')] })
       const messages = [firstMessage, toolResultMessage, latest]
-      const mockModel = { stream: vi.fn(), countTokens: vi.fn(async () => 5000) }
-      const strategy = Offload.summarize('toolResults').when({ utilization: 0.85 })
-      const context = makeContext(messages, 0.9, mockModel)
+      const summarizer = new MockMessageModel().addTurn({ type: 'textBlock', text: 'Summary of tool output' })
+      const strategy = Offload.summarize('toolResults', { model: summarizer }).when({ utilization: 0.85 })
+      const context = makeContext(messages, 0.9)
 
       const result = await strategy.apply(context)
 
@@ -334,7 +334,9 @@ describe('summarizer errors', () => {
 describe('repeated summarization', () => {
   // Regression test for https://github.com/strands-agents/harness-sdk/issues/4685
   it('keeps summaries out of a pinned message 0', async () => {
-    const strategy = Offload.summarize('*', { model: new MockMessageModel() }).when({
+    const summarizer = new MockMessageModel()
+    for (let index = 0; index < 30; index++) summarizer.addTurn({ type: 'textBlock', text: 'Summary' })
+    const strategy = Offload.summarize('*', { model: summarizer }).when({
       utilization: 0.7,
       preserveRecent: 4,
     })
@@ -435,6 +437,8 @@ describe('routing through Model.compact', () => {
 
   it('keeps target-filtered and threshold message-level summaries on the client-side path', async () => {
     const model = new MockMessageModel()
+      .addTurn({ type: 'textBlock', text: 'Summary' })
+      .addTurn({ type: 'textBlock', text: 'Summary' })
     const received = mockCompact(model, undefined)
     const strategies = [
       Offload.summarize('toolResults', { model }).when({ utilization: 0.7 }),
@@ -463,9 +467,55 @@ describe('routing through Model.compact', () => {
     expect(await eager.apply(makeRoutingContext(makeHistory(), 0.9, model))).toBe(true)
     expect(received).toEqual([])
 
+    const noToolResults = [text('user', 'task'), text('assistant', 'a'), text('user', 'b'), text('assistant', 'c')]
+    expect(await retroactive.apply(makeRoutingContext(noToolResults, 0.9, model))).toBe(false)
+    const belowThreshold = Offload.summarize('toolResults', { model }).when({ threshold: 100_000, preserveRecent: 1 })
+    expect(await belowThreshold.apply(makeRoutingContext(makeHistory(), 0.9, model))).toBe(false)
+    expect(received).toEqual([])
+
     const messages = makeHistory()
     expect(await retroactive.apply(makeRoutingContext(messages, 0.9, model))).toBe(true)
     expect(received).toHaveLength(1)
     expect(messages).toEqual(compacted)
+  })
+
+  it('keeps a tool pair that straddles the preserveRecent cut out of the summary', async () => {
+    const actualSummarize =
+      await vi.importActual<typeof import('../../methods/summarize.js')>('../../methods/summarize.js')
+    vi.mocked(summarizeContent).mockImplementationOnce(actualSummarize.summarizeContent)
+    const model = new MockMessageModel().addTurn({ type: 'textBlock', text: 'Summary' })
+    const toolUse = new Message({
+      role: 'assistant',
+      content: [new ToolUseBlock({ toolUseId: 'tool-1', name: 'read', input: {} })],
+    })
+    const toolResult = makeToolResultMessage('ok', 'tool-1')
+    const messages = [
+      text('user', 'task'),
+      text('assistant', 'a'),
+      text('user', 'b'),
+      toolUse,
+      toolResult,
+      text('assistant', 'c'),
+      text('user', 'latest'),
+    ]
+    const original = [...messages]
+    const summarizedTokens = await model.countTokens([messages[1]!, messages[2]!])
+    const strategy = Offload.summarize('*', { model }).when({ utilization: 0.7, preserveRecent: 3 })
+
+    expect(await strategy.apply(makeRoutingContext(messages, 0.9, model))).toBe(true)
+    expect(messages).toEqual([
+      original[0],
+      new Message({
+        role: 'assistant',
+        content: [
+          ...toolUse.content,
+          new TextBlock(`[Summarized: 2 messages, ~${summarizedTokens} tokens]\n\nSummary`),
+        ],
+        trackingId: toolUse.trackingId,
+      }),
+      toolResult,
+      original[5],
+      original[6],
+    ])
   })
 })

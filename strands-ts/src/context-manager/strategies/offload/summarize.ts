@@ -6,7 +6,8 @@
 
 import { logger } from '../../../logging/logger.js'
 import { normalizeError } from '../../../errors.js'
-import { Message, TextBlock, ToolResultBlock } from '../../../types/messages.js'
+import { TextBlock, ToolResultBlock } from '../../../types/messages.js'
+import type { Message } from '../../../types/messages.js'
 import { DocumentBlock, ImageBlock } from '../../../types/media.js'
 import type { ContentBlock } from '../../../types/messages.js'
 import type { Model } from '../../../models/model.js'
@@ -14,65 +15,14 @@ import type { InvocationContext } from '../../../agent/invocation-context.js'
 import type { LocalAgent } from '../../../types/agent.js'
 import type { ContextStrategy, ContextState } from '../../types.js'
 import {
-  flattenMessagesToContent,
   formatSummarized,
   summarizeContent,
+  summarizeMessages,
   toolResultToContentBlocks,
   type SummarizeConfig,
 } from '../../methods/summarize.js'
 import { formatStashRefs } from '../../stash.js'
-import {
-  BaseOffloadStrategy,
-  collectRemovableWithPair,
-  insertMarker,
-  spliceWithPairs,
-  repairAlternation,
-  type OffloadConditions,
-  type OffloadTarget,
-} from './base.js'
-
-/**
- * Replaces `eligible` messages in `messages` with one `[Summarized: ...]` marker, in place. Each eligible
- * message's tool-pair partner is summarized with it; message 0 and the last message never are.
- *
- * @param messages - The history to edit
- * @param eligible - Messages in `messages` to summarize
- * @param model - Model that writes the summary
- * @param config - Summarization settings; only `systemPrompt` is read
- * @param invocationContext - The request the summary call's usage is added to
- * @returns Whether any messages were summarized
- * @internal
- */
-export async function summarizeMessages(
-  messages: Message[],
-  eligible: Message[],
-  model: Model,
-  config?: SummarizeConfig,
-  invocationContext?: InvocationContext
-): Promise<boolean> {
-  const safeSet = new Set<Message>()
-  for (const message of eligible) {
-    const index = messages.indexOf(message)
-    if (index === -1) continue
-    for (const removable of collectRemovableWithPair(messages, index)) {
-      safeSet.add(removable)
-    }
-  }
-  const safe = messages.filter((message) => safeSet.has(message))
-  if (safe.length === 0) return false
-
-  const contentBlocks = flattenMessagesToContent(safe)
-  const summary = await summarizeContent(contentBlocks, model, config, invocationContext)
-  if (!summary) return false
-
-  const totalTokens = await model.countTokens(safe)
-  const { lowestIndex } = spliceWithPairs(messages, safe)
-  insertMarker(messages, lowestIndex, formatSummarized(`${safe.length} messages`, totalTokens, summary))
-
-  repairAlternation(messages)
-  logger.debug(`summarized=<${safe.length}>, tokens=<${totalTokens}> | batched summarization complete`)
-  return true
-}
+import { BaseOffloadStrategy, type OffloadConditions, type OffloadTarget } from './base.js'
 
 export class SummarizeStrategy extends BaseOffloadStrategy {
   readonly name = 'offload:summarize'
@@ -89,17 +39,9 @@ export class SummarizeStrategy extends BaseOffloadStrategy {
   }
 
   override async apply(context: ContextState): Promise<boolean> {
-    const model = this._resolveModel(context.agent)
-    if (!model) {
+    if (!this._resolveModel(context.agent)) {
       logger.warn('no model available for summarization')
       return false
-    }
-    if (this._isMessageLevel && this._selectsByRecencyOnly) {
-      if (!context.overflow && context.utilization < this._utilizationThreshold!) return false
-      return this._compact(context, model)
-    }
-    if (!this._isMessageLevel && this._isRetroactive && model.serverCompaction === true) {
-      return this._compact(context, model)
     }
     return super.apply(context)
   }
@@ -136,6 +78,7 @@ export class SummarizeStrategy extends BaseOffloadStrategy {
   protected override async _applyPerMessage(context: ContextState): Promise<boolean> {
     const model = this._resolveModel(context.agent)
     if (!model) return false
+    if (this._selectsByRecencyOnly) return this._compact(context, model)
 
     const { messages } = context
     if (messages.length <= 1) return false
@@ -144,6 +87,19 @@ export class SummarizeStrategy extends BaseOffloadStrategy {
     if (eligible.length === 0) return false
 
     return summarizeMessages(messages, eligible, model, this._config, context.invocationContext)
+  }
+
+  /**
+   * A retroactive per-block summary invalidates later thinking on a model that compacts server-side, so it
+   * compacts the history instead, but only when a block it targets is eligible.
+   */
+  protected override async _applyPerBlock(context: ContextState): Promise<boolean> {
+    const model = this._resolveModel(context.agent)
+    if (!model || !this._isRetroactive || model.serverCompaction !== true) return super._applyPerBlock(context)
+
+    const eligible = await this._getEligibleMessages(context)
+    if (eligible.length === 0) return false
+    return this._compact(context, model)
   }
 
   protected async _replaceBlock(

@@ -401,7 +401,8 @@ class Model(abc.ABC):
         Returns:
             The compacted history, or None if there was nothing to compact.
         """
-        from .._context_manager.strategies.offload.summarize import _summarize_messages
+        # Imported here: loading either module loads the event loop, which imports this module.
+        from .._context_manager.methods.summarize import _summarize_messages
         from ..agent.conversation_manager.compression.pin_message import is_pinned
 
         split = _compaction_split_index(messages, preserved_messages)
