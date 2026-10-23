@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 from pydantic import BaseModel
 
+from strands.agent.invocation_context import _create_invocation_context
 from strands.hooks.events import AfterInvocationEvent
 from strands.models import CacheConfig
 from strands.models import Model as SAModel
@@ -762,8 +763,12 @@ class TestCompact:
         original = list(messages)
         summarized_tokens = await model.count_tokens([messages[1], messages[3], messages[4]])
 
+        request = _create_invocation_context({})
+
         with unittest.mock.patch.object(model, "stream", wraps=model.stream) as stream:
-            tru_compacted = await model.compact(messages, preserved_messages=2, instructions="Keep ids")
+            tru_compacted = await model.compact(
+                messages, preserved_messages=2, instructions="Keep ids", invocation_context=request
+            )
 
         exp_compacted = [
             messages[0],
@@ -778,6 +783,7 @@ class TestCompact:
         assert tru_compacted == exp_compacted
         assert messages == original
         assert stream.call_args.kwargs["system_prompt"] == "Keep ids"
+        assert request.usage == {"turns_taken": 0, "inputTokens": 10, "outputTokens": 15, "totalTokens": 25}
 
     @pytest.mark.asyncio
     async def test_returns_none_without_a_model_call_when_nothing_before_the_cut_can_be_summarized(self, model):

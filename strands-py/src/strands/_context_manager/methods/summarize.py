@@ -23,6 +23,7 @@ from ..strategies.offload.base import (
 )
 
 if TYPE_CHECKING:
+    from ...agent.invocation_context import InvocationContext
     from ...models.model import Model
 
 logger = logging.getLogger(__name__)
@@ -67,6 +68,7 @@ async def _summarize_content(
     content: list[ContentBlock],
     model: Model,
     config: SummarizeConfig | None = None,
+    invocation_context: InvocationContext | None = None,
 ) -> str | None:
     """Summarize content blocks via an LLM call. Model errors propagate to the caller."""
     system_prompt = (config or {}).get("system_prompt", DEFAULT_SYSTEM_PROMPT)
@@ -81,7 +83,7 @@ async def _summarize_content(
     chunks = model.stream(messages, tool_specs=None, system_prompt=system_prompt)
 
     result_message: Message | None = None
-    async for event in process_stream(chunks):
+    async for event in process_stream(chunks, invocation_context=invocation_context):
         if "stop" in event:
             _, result_message, _, _ = event["stop"]
 
@@ -180,6 +182,7 @@ async def _summarize_messages(
     eligible: Messages,
     model: Model,
     config: SummarizeConfig | None = None,
+    invocation_context: InvocationContext | None = None,
 ) -> bool:
     """Replace ``eligible`` messages in ``messages`` with one ``[Summarized: ...]`` marker, in place.
 
@@ -190,6 +193,7 @@ async def _summarize_messages(
         eligible: Messages in ``messages`` to summarize.
         model: Model that writes the summary.
         config: Summarization settings; only ``system_prompt`` is read.
+        invocation_context: The request the summary call's usage is added to.
 
     Returns:
         Whether any messages were summarized.
@@ -207,7 +211,7 @@ async def _summarize_messages(
         return False
 
     content_blocks = _flatten_messages_to_content(safe)
-    summary = await _summarize_content(content_blocks, model, config)
+    summary = await _summarize_content(content_blocks, model, config, invocation_context)
     if not summary:
         return False
 

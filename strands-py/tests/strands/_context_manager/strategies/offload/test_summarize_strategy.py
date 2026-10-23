@@ -460,6 +460,7 @@ class TestSummarizeStrategyRouting:
             "system_prompt": "live system prompt",
             "system_prompt_content": [{"text": "live system prompt"}],
             "instructions": "Keep ids",
+            "invocation_context": None,
         }
         assert received == [(original, exp_kwargs)]
         assert messages == COMPACTED

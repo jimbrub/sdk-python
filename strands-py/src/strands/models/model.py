@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from .._context_manager.methods.summarize import SummarizeConfig
     from ..agent.agent import Agent
     from ..agent.agent_metadata import AgentMetadata
+    from ..agent.invocation_context import InvocationContext
 
 logger = logging.getLogger(__name__)
 
@@ -382,6 +383,7 @@ class Model(abc.ABC):
         system_prompt: str | None = None,
         system_prompt_content: list[SystemContentBlock] | None = None,
         instructions: str | None = None,
+        invocation_context: "InvocationContext | None" = None,
     ) -> Messages | None:
         """Summarize the older messages of a conversation and keep the most recent ones verbatim.
 
@@ -397,6 +399,7 @@ class Model(abc.ABC):
             system_prompt: The live conversation's plain string system prompt, passed through unchanged.
             system_prompt_content: The live conversation's structured system prompt, passed through unchanged.
             instructions: Custom summarization prompt that replaces the default one.
+            invocation_context: The request the summary call's usage is added to.
 
         Returns:
             The compacted history, or None if there was nothing to compact.
@@ -414,7 +417,7 @@ class Model(abc.ABC):
 
         compacted = list(messages)
         config: SummarizeConfig = {"system_prompt": instructions} if instructions is not None else {}
-        summarized = await _summarize_messages(compacted, older, self, config)
+        summarized = await _summarize_messages(compacted, older, self, config, invocation_context)
         return compacted if summarized else None
 
     def estimate_utilization(self, input_tokens: int) -> float:
