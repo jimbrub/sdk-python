@@ -410,7 +410,8 @@ describe('routing through Model.compact', () => {
     expect(await strategy.apply(makeRoutingContext(messages, 0.5, model))).toBe(false)
     expect(received).toEqual([])
 
-    const context = makeRoutingContext(messages, 0.9, model)
+    const context = makeRoutingContext(messages, 0.5, model)
+    context.overflow = true
     expect(await strategy.apply(context)).toBe(true)
     expect(received).toEqual([original])
     expect(model.compact).toHaveBeenCalledWith(

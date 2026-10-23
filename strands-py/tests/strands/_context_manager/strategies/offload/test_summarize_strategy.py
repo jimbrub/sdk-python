@@ -452,7 +452,8 @@ class TestSummarizeStrategyRouting:
         assert await strategy.apply(ContextState(messages=messages, agent=routing_agent, utilization=0.5)) is False
         assert received == []
 
-        assert await strategy.apply(ContextState(messages=messages, agent=routing_agent, utilization=0.9)) is True
+        context = ContextState(messages=messages, agent=routing_agent, utilization=0.5, overflow=True)
+        assert await strategy.apply(context) is True
         exp_kwargs = {
             "preserved_messages": 2,
             "tool_specs": [{"name": "read"}],

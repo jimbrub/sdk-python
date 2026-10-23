@@ -724,12 +724,6 @@ export abstract class Model<T extends BaseModelConfig = BaseModelConfig> {
 }
 
 /**
- * Estimate tokens for a content block using character-based heuristics.
- *
- * @param block - Content block to estimate tokens for
- * @returns Estimated token count
- */
-/**
  * Returns the index of the first message `compact()` keeps verbatim.
  *
  * The cut only ever moves back, so at least `preservedMessages` are kept: it never passes the last
@@ -754,6 +748,12 @@ function splitsToolPair(messages: Message[], index: number): boolean {
   return hasToolResult && messages[index - 1]!.content.some((block) => block.type === 'toolUseBlock')
 }
 
+/**
+ * Estimate tokens for a content block using character-based heuristics.
+ *
+ * @param block - Content block to estimate tokens for
+ * @returns Estimated token count
+ */
 function estimateContentBlockTokens(block: ContentBlock): number {
   let total = 0
 
