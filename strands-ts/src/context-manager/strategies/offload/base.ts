@@ -328,6 +328,12 @@ export abstract class BaseOffloadStrategy implements ContextStrategy {
   protected readonly _excludeFilter: Set<string> | undefined
   protected _stash: Stash | undefined
 
+  /**
+   * Whether this strategy edits content the model has already seen.
+   * Eager per-block offloading rewrites a message before the next model call, so it never is.
+   */
+  protected readonly _isRetroactive: boolean
+
   constructor(target?: OffloadTarget, conditions?: OffloadConditions) {
     if (Array.isArray(target) && target.length === 0) {
       throw new Error('Empty array target matches nothing — provide at least one target')
@@ -337,6 +343,7 @@ export abstract class BaseOffloadStrategy implements ContextStrategy {
     this._threshold = finiteOrUndefined(conditions?.threshold)
     this._utilizationThreshold = finiteOrUndefined(conditions?.utilization)
     this._preserveRecent = finiteOrUndefined(conditions?.preserveRecent) ?? 0
+    this._isRetroactive = this._utilizationThreshold !== undefined || this._preserveRecent > 0
 
     const resolved = resolveToolFilter(target)
     this._includeFilter = resolved.include

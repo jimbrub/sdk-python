@@ -1,5 +1,6 @@
 """Tests for the SummarizeStrategy."""
 
+import functools
 import logging
 import unittest.mock
 
@@ -7,6 +8,7 @@ import pytest
 
 from strands._context_manager.strategies.offload import Offload
 from strands._context_manager.types import ContextState
+from strands.models.model import Model
 from strands.types.content import ContentBlock, Message, Messages
 from strands.types.tools import ToolResult, ToolUse
 
@@ -46,6 +48,8 @@ def mock_agent():
     agent.model.count_tokens = unittest.mock.AsyncMock(return_value=5000)
     agent.model.estimate_utilization = unittest.mock.MagicMock(return_value=0.9)
     agent.model.stream = _make_stream_events("Summary of content.")
+    agent.model.compact = functools.partial(Model.compact, agent.model)
+    agent.model.server_compaction = None
     agent.aux_model = agent.model
     agent.messages = []
     return agent
@@ -388,3 +392,118 @@ class TestSummarizationWithToolCalls:
             ]
         ]
         assert tru_calls == exp_calls
+
+
+def _large_result(tool_use_id: str) -> Message:
+    return Message(
+        role="user",
+        content=[
+            ContentBlock(
+                toolResult=ToolResult(toolUseId=tool_use_id, status="success", content=[{"text": "x" * 10000}])
+            )
+        ],
+    )
+
+
+def _routing_history() -> Messages:
+    return [
+        Message(role="user", content=[ContentBlock(text="task")]),
+        Message(role="assistant", content=[ContentBlock(text="a")]),
+        _large_result("tool-1"),
+        Message(role="assistant", content=[ContentBlock(text="b")]),
+        _large_result("tool-2"),
+        Message(role="assistant", content=[ContentBlock(text="c")]),
+        Message(role="user", content=[ContentBlock(text="latest")]),
+    ]
+
+
+COMPACTED: Messages = [
+    Message(role="user", content=[ContentBlock(text="task")]),
+    Message(role="assistant", content=[ContentBlock(text="summary")]),
+    Message(role="user", content=[ContentBlock(text="latest")]),
+]
+
+
+@pytest.fixture
+def routing_agent(mock_agent):
+    mock_agent.tool_registry.get_all_tool_specs.return_value = [{"name": "read"}]
+    mock_agent.system_prompt = "live system prompt"
+    mock_agent.system_prompt_content = [{"text": "live system prompt"}]
+    mock_agent.model.compact = unittest.mock.AsyncMock(return_value=list(COMPACTED))
+    return mock_agent
+
+
+class TestSummarizeStrategyRouting:
+    """Tests for which summaries go through Model.compact."""
+
+    @pytest.mark.asyncio
+    async def test_sends_a_whole_history_message_level_summary_through_compact(self, routing_agent):
+        received = []
+
+        async def compact(messages, **kwargs):
+            received.append((list(messages), kwargs))
+            return list(COMPACTED)
+
+        routing_agent.model.compact = compact
+        strategy = Offload.summarize("*", {"system_prompt": "Keep ids"}).when(utilization=0.7, preserve_recent=2)
+        messages = _routing_history()
+        original = list(messages)
+
+        assert await strategy.apply(ContextState(messages=messages, agent=routing_agent, utilization=0.5)) is False
+        assert received == []
+
+        assert await strategy.apply(ContextState(messages=messages, agent=routing_agent, utilization=0.9)) is True
+        exp_kwargs = {
+            "preserved_messages": 2,
+            "tool_specs": [{"name": "read"}],
+            "system_prompt": "live system prompt",
+            "system_prompt_content": [{"text": "live system prompt"}],
+            "instructions": "Keep ids",
+        }
+        assert received == [(original, exp_kwargs)]
+        assert messages == COMPACTED
+
+    @pytest.mark.asyncio
+    async def test_leaves_the_history_unchanged_when_compact_has_nothing_to_compact(self, routing_agent):
+        routing_agent.model.compact.return_value = None
+        strategy = Offload.summarize("*").when(utilization=0.7)
+        messages = _routing_history()
+
+        assert await strategy.apply(ContextState(messages=messages, agent=routing_agent, utilization=0.9)) is False
+        assert messages == _routing_history()
+
+    @pytest.mark.asyncio
+    async def test_keeps_target_filtered_and_threshold_message_level_summaries_on_the_client_side_path(
+        self, routing_agent
+    ):
+        strategies = [
+            Offload.summarize("tool_results").when(utilization=0.7),
+            Offload.summarize("*").when(utilization=0.7, threshold=10),
+        ]
+
+        for strategy in strategies:
+            context = ContextState(messages=_routing_history(), agent=routing_agent, utilization=0.9)
+            assert await strategy.apply(context) is True
+        routing_agent.model.compact.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sends_a_retroactive_per_block_summary_through_compact_only_when_the_model_compacts_server_side(
+        self, routing_agent
+    ):
+        retroactive = Offload.summarize("tool_results").when(preserve_recent=1)
+        eager = Offload.summarize("tool_results").when(threshold=10)
+
+        routing_agent.model.server_compaction = None
+        context = ContextState(messages=_routing_history(), agent=routing_agent, utilization=0.9)
+        assert await retroactive.apply(context) is True
+        routing_agent.model.compact.assert_not_called()
+
+        routing_agent.model.server_compaction = True
+        context = ContextState(messages=_routing_history(), agent=routing_agent, utilization=0.9)
+        assert await eager.apply(context) is True
+        routing_agent.model.compact.assert_not_called()
+
+        messages = _routing_history()
+        assert await retroactive.apply(ContextState(messages=messages, agent=routing_agent, utilization=0.9)) is True
+        routing_agent.model.compact.assert_called_once()
+        assert messages == COMPACTED

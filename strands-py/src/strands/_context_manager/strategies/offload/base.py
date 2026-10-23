@@ -304,6 +304,11 @@ class BaseOffloadStrategy(ABC):
     _include_filter: set[str] | None
     _exclude_filter: set[str] | None
     _stash: Stash | None
+    _is_retroactive: bool
+    """Whether this strategy edits content the model has already seen.
+
+    Eager per-block offloading rewrites a message before the next model call, so it never is.
+    """
 
     def __init__(self, target: OffloadTarget | None = None, conditions: OffloadConditions | None = None) -> None:
         if isinstance(target, list) and len(target) == 0:
@@ -318,6 +323,7 @@ class BaseOffloadStrategy(ABC):
         self._utilization_threshold = float(util) if util is not None else None
         preserve = _finite_or_none(conditions.get("preserve_recent"))
         self._preserve_recent = float(preserve) if preserve is not None else 0
+        self._is_retroactive = self._utilization_threshold is not None or self._preserve_recent > 0
 
         self._include_filter, self._exclude_filter = _resolve_tool_filter(target)
 
