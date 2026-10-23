@@ -122,8 +122,7 @@ class SummarizeStrategy(BaseOffloadStrategy):
         if not eligible:
             return False
         # ``preserve_recent`` counts only matching messages, so the cut is set just after the newest eligible one.
-        eligible_ids = {id(message) for message in eligible}
-        newest_eligible = max(index for index, message in enumerate(messages) if id(message) in eligible_ids)
+        newest_eligible = next(index for index in reversed(range(len(messages))) if messages[index] is eligible[-1])
         return await self._compact(context, model, len(messages) - newest_eligible - 1)
 
     async def _replace_block(

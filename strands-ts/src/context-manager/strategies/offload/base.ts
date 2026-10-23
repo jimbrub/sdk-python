@@ -357,8 +357,7 @@ export abstract class BaseOffloadStrategy implements ContextStrategy {
 
   init(agent: LocalAgent, stash?: Stash): void {
     this._stash = stash
-    if (this._isMessageLevel) return
-    if (this._preserveRecent > 0) return
+    if (this._isRetroactive) return
     agent.addHook(MessageAddedEvent, async (event) => {
       const messages = event.agent.messages
       const index = messages.indexOf(event.message)

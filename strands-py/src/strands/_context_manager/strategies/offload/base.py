@@ -338,9 +338,7 @@ class BaseOffloadStrategy(ABC):
         self._stash = stash
         from ....hooks.events import MessageAddedEvent
 
-        if self._is_message_level:
-            return
-        if self._preserve_recent > 0:
+        if self._is_retroactive:
             return
 
         async def _eager_hook(event: MessageAddedEvent) -> None:

@@ -217,12 +217,9 @@ async def _summarize_messages(
 
     total_tokens = await model.count_tokens(safe)
 
-    removed, lowest_index = _splice_with_pairs(messages, safe)
-    if removed == 0:
-        return False
-
-    _insert_marker(messages, lowest_index, _format_summarized(f"{removed} messages", total_tokens, summary))
+    _, lowest_index = _splice_with_pairs(messages, safe)
+    _insert_marker(messages, lowest_index, _format_summarized(f"{len(safe)} messages", total_tokens, summary))
 
     _repair_alternation(messages)
-    logger.debug("summarized=<%s>, tokens=<%s> | batched summarization complete", removed, total_tokens)
+    logger.debug("summarized=<%s>, tokens=<%s> | batched summarization complete", len(safe), total_tokens)
     return True

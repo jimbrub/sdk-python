@@ -7,9 +7,8 @@
 import { logger } from '../../../logging/logger.js'
 import { normalizeError } from '../../../errors.js'
 import { TextBlock, ToolResultBlock } from '../../../types/messages.js'
-import type { Message } from '../../../types/messages.js'
 import { DocumentBlock, ImageBlock } from '../../../types/media.js'
-import type { ContentBlock } from '../../../types/messages.js'
+import type { ContentBlock, Message } from '../../../types/messages.js'
 import type { Model } from '../../../models/model.js'
 import type { InvocationContext } from '../../../agent/invocation-context.js'
 import type { LocalAgent } from '../../../types/agent.js'
@@ -101,7 +100,7 @@ export class SummarizeStrategy extends BaseOffloadStrategy {
     const eligible = await this._getEligibleMessages(context)
     if (eligible.length === 0) return false
     // `preserveRecent` counts only matching messages, so the cut is set just after the newest eligible one.
-    const newestEligible = Math.max(...eligible.map((message) => messages.indexOf(message)))
+    const newestEligible = messages.indexOf(eligible[eligible.length - 1]!)
     return this._compact(context, model, messages.length - newestEligible - 1)
   }
 
