@@ -5,7 +5,6 @@ import {
   type InvokableAgent,
   type InvokeArgs,
   type InvokeOptions,
-  LIMITS_KEYS,
   type LocalAgent,
   type localAgentSymbol,
 } from '../types/agent.js'
@@ -36,7 +35,7 @@ import { ModelRouter } from '../models/routing/router.js'
 import type { BaseModelConfig, StreamAggregatedResult, StreamOptions } from '../models/model.js'
 import { ModelPlugin } from '../plugins/model-plugin.js'
 import { totalPromptTokens, isModelStreamEvent } from '../models/streaming.js'
-import { InvocationContextImpl, reachedLimit, unwrapInvocationContext } from './invocation-context.js'
+import { InvocationContextImpl, reachedLimit, resolveInvocationContext } from './invocation-context.js'
 import { ToolRegistry } from '../registry/tool-registry.js'
 import { StateStore } from '../state-store.js'
 import { serializeStateSerializable, loadStateSerializable } from '../types/serializable.js'
@@ -926,34 +925,6 @@ export class Agent implements LocalAgent, InvokableAgent {
   }
 
   /**
-   * Validates {@link InvokeOptions.limits} so bad input fails fast instead of
-   * being silently ignored (`NaN`, `Infinity`) or stopping the call at once
-   * (zero, negative). Each limit, when set, must be a positive finite number;
-   * fractional values are allowed. An unrecognized key throws, since a mistyped
-   * limit name would otherwise apply no limit at all.
-   */
-  private _validateLimits(options: InvokeOptions | undefined): void {
-    if (!options?.limits) return
-    const { limits } = options
-    const recognizedKeys = new Set<string>(LIMITS_KEYS)
-    const unrecognizedKeys = Object.keys(limits)
-      .filter((key) => !recognizedKeys.has(key))
-      .sort()
-    if (unrecognizedKeys.length > 0) {
-      throw new TypeError(
-        `limits keys [${unrecognizedKeys.join(', ')}] are not recognized limits, ` +
-          `expected one of ${LIMITS_KEYS.map((key) => `'${key}'`).join(', ')}`
-      )
-    }
-    for (const key of LIMITS_KEYS) {
-      const value = limits[key]
-      if (value !== undefined && (!Number.isFinite(value) || value <= 0)) {
-        throw new TypeError(`limits.${key} must be a positive finite number, got ${value}`)
-      }
-    }
-  }
-
-  /**
    * Builds the {@link AgentResult} for a call that stopped because a limit was
    * reached. When the request had already reached a limit before this call
    * appended anything, `lastMessage` is an empty assistant message rather than
@@ -997,20 +968,6 @@ export class Agent implements LocalAgent, InvokableAgent {
     if (limitStopReason === undefined) return true
     logger.debug(`limit=<${limitStopReason}> | ignoring resume because the request reached its limit`)
     return false
-  }
-
-  /**
-   * Joins the request given in `options.invocationContext`, or starts a new request
-   * with this call's limits. A nested call that sets its own `limits` gets child
-   * state, bound by both its own limits and the request's.
-   *
-   * @param options - The per-invocation options, if any
-   * @returns The state of the request to run this call in
-   */
-  private _resolveInvocationContext(options: InvokeOptions | undefined): InvocationContextImpl {
-    const inherited = unwrapInvocationContext(options?.invocationContext)
-    if (!inherited) return new InvocationContextImpl(options?.limits)
-    return options?.limits === undefined ? inherited : new InvocationContextImpl(options.limits, inherited)
   }
 
   /**
@@ -1258,8 +1215,7 @@ export class Agent implements LocalAgent, InvokableAgent {
       const invocationState: InvocationState = options?.invocationState ?? {}
       const resolvedOptions: InvokeOptions = options?.invocationState ? options : { ...options, invocationState }
 
-      this._validateLimits(options)
-      const invocationContext = this._resolveInvocationContext(options)
+      const invocationContext = resolveInvocationContext(options)
 
       let currentArgs: InvokeArgs = args
 
