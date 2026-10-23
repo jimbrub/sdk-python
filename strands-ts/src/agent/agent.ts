@@ -29,7 +29,7 @@ import { McpClient } from '../mcp/index.js'
 import { isValidToolName, type Tool } from '../tools/tool.js'
 import type { ToolChoice, ToolSpec } from '../tools/types.js'
 import { cloneSystemPrompt, systemPromptFromData } from '../types/messages.js'
-import { normalizeError, ConcurrentInvocationError, StructuredOutputError } from '../errors.js'
+import { normalizeError, ConcurrentInvocationError } from '../errors.js'
 import { Model } from '../models/model.js'
 import { ModelProxy } from '../models/model-proxy.js'
 import { ModelRouter } from '../models/routing/router.js'
@@ -1770,23 +1770,27 @@ export class Agent implements LocalAgent, InvokableAgent {
             assistantMessage = pendingExecution.assistantMessage
             completedToolResults = pendingExecution.completedToolResults
           } else {
-            const modelResult = yield* this._invokeModel(invocationState, invocationContext, structuredOutputChoice)
+            const modelResult = yield* this._invokeModel(
+              invocationState,
+              invocationContext,
+              structuredOutputChoice,
+              structuredOutputChoice && structuredOutputSchema
+            )
 
             if (modelResult.stopReason !== 'toolUse') {
-              // Schema set, we already forced, and the model still refused.
-              // Throw before closing the span so the cycle span records the error.
-              if (structuredOutputTool && structuredOutputChoice) {
-                throw new StructuredOutputError(
-                  'The model failed to invoke the structured output tool even after it was forced.'
-                )
-              }
+              // Validate before closing the span so the cycle span records a failure.
+              const structuredOutput = this._structuredOutputFromText(
+                modelResult.message,
+                structuredOutputTool,
+                structuredOutputChoice
+              )
 
               closeCycle()
 
               // Schema set, model ignored the tool — drop the response and force the tool next cycle.
               // Appending the plain-text turn here would leave the conversation ending on an
               // assistant message, which providers like Bedrock reject as assistant prefill.
-              if (structuredOutputTool) {
+              if (structuredOutputTool && !structuredOutputChoice) {
                 structuredOutputChoice = { tool: { name: STRUCTURED_OUTPUT_TOOL_NAME } }
                 logger.debug(
                   'structured output schema set but model responded with plain text; forcing tool use on next cycle'
@@ -1794,13 +1798,14 @@ export class Agent implements LocalAgent, InvokableAgent {
                 continue
               }
 
-              // Normal end of turn.
+              // Normal end of turn, carrying any structured output the retry returned as text.
               yield this._appendMessage(modelResult.message, invocationState, invocationContext)
               result = new AgentResult({
                 invocationContext,
                 stopReason: modelResult.stopReason,
                 lastMessage: modelResult.message,
                 traces: this._tracer.localTraces,
+                ...(structuredOutput !== undefined && { structuredOutput }),
                 metrics: this._meter.metrics,
                 invocationState,
               })
@@ -2042,6 +2047,25 @@ export class Agent implements LocalAgent, InvokableAgent {
   }
 
   /**
+   * Validates the text that ended the structured output retry, which may be JSON when the provider could not force
+   * the tool.
+   *
+   * @param message - The assistant message that ended the turn without a tool call
+   * @param structuredOutputTool - The structured output tool, if a schema is set
+   * @param structuredOutputChoice - The tool choice the turn was forced with, if it was the retry
+   * @returns The validated structured output, or undefined if the turn was not the structured output retry
+   * @throws StructuredOutputError if the retry produced no valid structured output
+   */
+  private _structuredOutputFromText(
+    message: Message,
+    structuredOutputTool: StructuredOutputTool | undefined,
+    structuredOutputChoice: ToolChoice | undefined
+  ): JSONValue | undefined {
+    if (!structuredOutputTool || !structuredOutputChoice) return undefined
+    return structuredOutputTool.resultFromText(message)
+  }
+
+  /**
    * Extracts the validated structured output result from tool execution.
    *
    * @param toolUseMessage - The assistant message containing tool use blocks
@@ -2224,12 +2248,14 @@ export class Agent implements LocalAgent, InvokableAgent {
    *
    * @param args - Optional arguments for invoking the model
    * @param toolChoice - Optional tool choice to force specific tool usage
+   * @param structuredOutputSchema - Schema the call must produce, passed on the structured output retry
    * @returns Object containing the assistant message, stop reason, and optional redaction message
    */
   private async *_invokeModel(
     invocationState: InvocationState,
     invocationContext: InvocationContextImpl,
-    toolChoice?: ToolChoice
+    toolChoice?: ToolChoice,
+    structuredOutputSchema?: z.ZodSchema
   ): AsyncGenerator<AgentStreamEvent, StreamAggregatedResult, undefined> {
     const toolSpecs = this._toolRegistry.list().map((tool) => tool.toolSpec)
     const streamOptions: StreamOptions = { toolSpecs, modelState: this.modelState }
@@ -2325,7 +2351,8 @@ export class Agent implements LocalAgent, InvokableAgent {
           selectedModel,
           invokedModelRef,
           toolChoice,
-          projectedInputTokens
+          projectedInputTokens,
+          structuredOutputSchema
         )
         const routedModel = this._modelRouter?.getRoutedModel(this, invocationState) ?? selectedModel
         const model = invokedModelRef.model ?? selectedModel
@@ -2415,6 +2442,8 @@ export class Agent implements LocalAgent, InvokableAgent {
    * @param selectedModel - Model the chain starts with; middleware may replace it
    * @param invokedModelRef - Slot filled with the model the terminal actually invoked
    * @param toolChoice - Optional tool choice to force specific tool usage
+   * @param projectedInputTokens - Estimated input token count for this call
+   * @param structuredOutputSchema - Schema the call must produce, passed on the structured output retry
    * @returns StreamAggregatedResult from the model (or middleware short-circuit)
    */
   private async *_invokeModelWithMiddleware(
@@ -2423,7 +2452,8 @@ export class Agent implements LocalAgent, InvokableAgent {
     selectedModel: Model,
     invokedModelRef: InvokedModelRef,
     toolChoice?: ToolChoice,
-    projectedInputTokens?: number
+    projectedInputTokens?: number,
+    structuredOutputSchema?: z.ZodSchema
   ): AsyncGenerator<AgentStreamEvent, StreamAggregatedResult, undefined> {
     const context: InvokeModelContext = {
       agent: this,
@@ -2434,6 +2464,7 @@ export class Agent implements LocalAgent, InvokableAgent {
       ...(toolChoice !== undefined && { toolChoice: deepCopy(toolChoice) as unknown as ToolChoice }),
       invocationState,
       ...(projectedInputTokens !== undefined && { projectedInputTokens }),
+      ...(structuredOutputSchema !== undefined && { structuredOutputSchema }),
       invocationContext,
     }
 
@@ -2472,6 +2503,7 @@ export class Agent implements LocalAgent, InvokableAgent {
             // Omitted when zero, so an ordinary call's options are unchanged.
             ...(ctx.dynamicTrailingBlocks ? { dynamicTrailingBlocks: ctx.dynamicTrailingBlocks } : {}),
             ...(self.sessionManager ? { agentMetadata: { sessionId: self.sessionId } } : {}),
+            ...(ctx.structuredOutputSchema && { structuredOutputSchema: ctx.structuredOutputSchema }),
           }
           const gen = self._streamFromModel(
             ctx.model,
