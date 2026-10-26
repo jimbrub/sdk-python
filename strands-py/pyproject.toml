@@ -34,7 +34,7 @@ dependencies = [
     "docstring_parser>=0.15,<1.0",
     "httpx>=0.28.1,<1.0.0",
     "jsonschema>=4.0.0,<5.0.0",
-    "mcp>=1.23.0,<2.2",
+    "mcp>=1.23.0,<2.4",
     "pydantic>=2.4.0,<3.0.0",
     "typing-extensions>=4.13.2,<5.0.0",
     "pyyaml>=6.0.0,<7.0.0",
@@ -48,7 +48,10 @@ dependencies = [
 [project.optional-dependencies]
 anthropic = ["anthropic>=0.21.0,<1.0.0"]
 gemini = ["google-genai>=1.68.0,<3.0.0"]
-litellm = ["litellm>=1.75.9,<2.0.0", "openai>=1.68.0,<3.0.0"]
+# Ceiling is the last known-good release rather than the major: 1.107.0 was a compromised
+# build (credential stealer, removed from PyPI 2026-10-21). Given that history the cap moves
+# only via a reviewed Dependabot bump, never an automatic in-range resolve.
+litellm = ["litellm>=1.75.9,<1.107.0", "openai>=1.68.0,<3.0.0"]
 llamaapi = ["llama-api-client>=0.1.0,<1.0.0"]
 mistral = ["mistralai>=2.0.0,<4.0.0"]
 ollama = ["ollama>=0.4.8,<1.0.0"]
@@ -78,7 +81,7 @@ a2a = [
     "starlette>=1.0.0,<2.0.0",
 ]
 
-cedar = ["cedarpy==4.12.0", "cedar-policy-mcp-schema-generator==0.6.1"]
+cedar = ["cedarpy==4.12.2", "cedar-policy-mcp-schema-generator==0.6.1"]
 
 bidi = [
     "aws_sdk_bedrock_runtime[awscrt]>=0.11.0,<0.12.0; python_version>='3.12'",
