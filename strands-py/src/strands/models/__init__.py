@@ -6,8 +6,9 @@ This package includes an abstract base Model class along with concrete implement
 from typing import Any
 
 from . import bedrock, model, routing
+from ._summarize import SummarizeResult
 from .bedrock import BedrockModel
-from .model import BaseModelConfig, CacheConfig, CacheToolsConfig, Model, SummarizeResult
+from .model import BaseModelConfig, CacheConfig, CacheToolsConfig, Model
 from .routing import (
     CandidateInput,
     ClassifierStrategy,

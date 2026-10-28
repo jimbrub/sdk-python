@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest'
 import { Offload } from '../offload/index.js'
 import { compactionSplitIndex } from '../offload/summarize.js'
-import { DEFAULT_BLOCK_INSTRUCTIONS } from '../../methods/summarize.js'
 import { InvocationContextImpl } from '../../../agent/invocation-context.js'
 import { Message, TextBlock, ToolResultBlock, ToolUseBlock } from '../../../types/messages.js'
 import { ImageBlock, VideoBlock } from '../../../types/media.js'
@@ -12,7 +11,8 @@ import { anyTrackingId } from '../../../__fixtures__/message-helpers.js'
 import type { Agent } from '../../../agent/agent.js'
 import type { ToolRegistry } from '../../../registry/tool-registry.js'
 import type { ContextState } from '../../types.js'
-import { Model, type SummarizeResult } from '../../../models/model.js'
+import { Model } from '../../../models/model.js'
+import type { SummarizeResult } from '../../../models/summarize.js'
 
 const baseSummarize = Model.prototype.summarize
 
@@ -20,7 +20,6 @@ const baseSummarize = Model.prototype.summarize
 function mockBlockSummary(): void {
   vi.spyOn(Model.prototype, 'summarize').mockResolvedValue({
     summary: new Message({ role: 'user', content: [new TextBlock('Summary of multimodal content')] }),
-    usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
   })
 }
 
@@ -151,7 +150,7 @@ describe('Offload.summarize', () => {
             trackingId: anyTrackingId,
           }),
         ],
-        { instructions: DEFAULT_BLOCK_INSTRUCTIONS }
+        { instructions: expect.stringContaining('Summarize the content between the <content> delimiters') }
       )
     })
 
@@ -435,6 +434,21 @@ describe('routing through Model.summarize', () => {
 
     expect(await strategy.apply(context)).toBe(true)
     expect((context.invocationContext as InvocationContextImpl).usage).toEqual({ turnsTaken: 0, ...usage })
+  })
+
+  it('records no usage when the provider reports none', async () => {
+    const model = new MockMessageModel()
+    mockSummarize(model, { summary })
+    const strategy = Offload.summarize('*', { model }).when({ utilization: 0.7, preserveRecent: 2 })
+    const context = makeRoutingContext(makeHistory(), 0.9, model)
+
+    expect(await strategy.apply(context)).toBe(true)
+    expect((context.invocationContext as InvocationContextImpl).usage).toEqual({
+      turnsTaken: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+    })
   })
 
   it('moves a cut on a tool pair forward', async () => {

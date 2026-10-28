@@ -191,14 +191,8 @@ export {
 } from './models/streaming.js'
 
 // Model provider types
-export type {
-  BaseModelConfig,
-  CountTokensOptions,
-  StreamOptions,
-  CacheConfig,
-  SummarizeOptions,
-  SummarizeResult,
-} from './models/model.js'
+export type { BaseModelConfig, CountTokensOptions, StreamOptions, CacheConfig } from './models/model.js'
+export type { SummarizeOptions, SummarizeResult } from './models/summarize.js'
 export type { ModelInfo, ModelCapabilities, ModelLimits, PromptCaching } from './models/model-info.js'
 
 export { Model } from './models/model.js'

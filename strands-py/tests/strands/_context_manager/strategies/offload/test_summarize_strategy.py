@@ -5,11 +5,11 @@ import unittest.mock
 
 import pytest
 
-from strands._context_manager.methods.summarize import _DEFAULT_BLOCK_INSTRUCTIONS
 from strands._context_manager.strategies.offload import Offload
-from strands._context_manager.strategies.offload.summarize import _compaction_split_index
+from strands._context_manager.strategies.offload.summarize import _DEFAULT_BLOCK_INSTRUCTIONS, _compaction_split_index
 from strands._context_manager.types import ContextState
-from strands.models.model import Model, SummarizeResult
+from strands.models import SummarizeResult
+from strands.models.model import Model
 from strands.types.content import ContentBlock, Message, Messages
 from strands.types.tools import ToolResult, ToolUse
 
@@ -622,6 +622,18 @@ class TestSummarizeStrategyRouting:
 
         assert await strategy.apply(context) is True
         invocation_context._record_usage.assert_called_once_with(USAGE)
+
+    @pytest.mark.asyncio
+    async def test_records_no_usage_when_the_provider_reports_none(self, routing_agent):
+        routing_agent.model.summarize.return_value = SummarizeResult(summary=SUMMARY)
+        invocation_context = unittest.mock.MagicMock()
+        strategy = Offload.summarize("*").when(utilization=0.7, preserve_recent=2)
+        context = ContextState(
+            messages=_routing_history(), agent=routing_agent, utilization=0.9, invocation_context=invocation_context
+        )
+
+        assert await strategy.apply(context) is True
+        invocation_context._record_usage.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_sends_a_prefix_opening_with_an_assistant_turn_through_base_summarize(

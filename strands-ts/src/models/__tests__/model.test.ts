@@ -10,7 +10,8 @@ import {
 import { CitationsBlock } from '../../types/citations.js'
 import { TestModelProvider, collectGenerator } from '../../__fixtures__/model-test-helpers.js'
 import { MaxTokensError, ModelError } from '../../errors.js'
-import { DEFAULT_SUMMARIZE_INSTRUCTIONS, Model } from '../model.js'
+import { Model } from '../model.js'
+import { DEFAULT_SUMMARIZE_INSTRUCTIONS } from '../summarize.js'
 import { mergeModelInfo, type ModelInfo } from '../model-info.js'
 import type { BaseModelConfig, StreamOptions } from '../model.js'
 import { isModelStreamEvent, type ModelStreamEvent } from '../streaming.js'
@@ -1407,7 +1408,6 @@ describe('summarize', () => {
         content: [new TextBlock('first\ncited\nsecond')],
         trackingId: anyTrackingId,
       }),
-      usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
     })
   })
 

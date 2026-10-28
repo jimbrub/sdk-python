@@ -8,9 +8,10 @@ import pytest
 from pydantic import BaseModel
 
 from strands.hooks.events import AfterInvocationEvent
-from strands.models import CacheConfig
+from strands.models import CacheConfig, SummarizeResult
 from strands.models import Model as SAModel
-from strands.models.model import _DEFAULT_SUMMARIZE_INSTRUCTIONS, SummarizeResult, _ModelPlugin
+from strands.models._summarize import _DEFAULT_SUMMARIZE_INSTRUCTIONS
+from strands.models.model import _ModelPlugin
 
 
 class Person(BaseModel):
@@ -791,7 +792,6 @@ class TestSummarize:
 
         exp_result = SummarizeResult(
             summary={"role": "user", "content": [{"text": "first\nsecond"}]},
-            usage={"inputTokens": 0, "outputTokens": 0, "totalTokens": 0},
         )
         assert tru_result == exp_result
 
