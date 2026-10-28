@@ -305,7 +305,7 @@ create_harness(builtin_tools={"web_fetch": {"model": "anthropic/claude-haiku-4-5
 ```
 
 `web_search` is the other one: it lets the agent look things up on the web mid-answer. Where the
-model provider has its own search (OpenAI, Google, Anthropic, and GPT-5/GPT-6 models on
+model provider has its own search (OpenAI, Google, Anthropic, and GPT-5, GPT-6, and Daybreak models on
 `bedrock-mantle` via Bedrock Web Search) the harness turns that on by default. In case of no
 native search (Amazon Bedrock Converse, other Mantle models, a `Model` instance) `web_search` is
 off by default. To enable web search for these providers, you can opt into Exa with
