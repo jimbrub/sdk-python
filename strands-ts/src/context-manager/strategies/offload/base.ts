@@ -145,6 +145,15 @@ export function messageMatchesTarget(
 }
 
 /**
+ * Resolves `preserveRecent` to a message count: a ratio when between 0 and 1 exclusive, else a count.
+ *
+ * @internal
+ */
+export function resolvePreserveCount(total: number, preserveRecent: number): number {
+  return preserveRecent > 0 && preserveRecent < 1 ? Math.ceil(total * preserveRecent) : Math.floor(preserveRecent)
+}
+
+/**
  * Returns target-matching messages excluding the most recent matches.
  * First filters to only messages that match the target, then removes the tail.
  *
@@ -161,8 +170,7 @@ export function getOldestMatches(
   const matching = messages.filter((message) =>
     messageMatchesTarget(message, target, toolNameMap, toolIncludeFilter, toolExcludeFilter)
   )
-  const count =
-    preserveRecent > 0 && preserveRecent < 1 ? Math.ceil(matching.length * preserveRecent) : Math.floor(preserveRecent)
+  const count = resolvePreserveCount(matching.length, preserveRecent)
   if (count >= matching.length) return []
   return matching.slice(0, -count)
 }
@@ -228,28 +236,27 @@ export function spliceWithPairs(messages: Message[], toRemove: Message[]): { rem
 }
 
 /**
- * Adds a removal marker as assistant content at the gap left by removed messages.
+ * Adds `content` as assistant content at the gap left by removed messages.
  *
- * The marker is appended to an assistant message beside the gap, which keeps that message's
+ * The content is appended to an assistant message beside the gap, which keeps that message's
  * tracking id and block indices for stash refs, or becomes its own assistant message. It never
- * joins message 0, and the last message is never removed, so a new marker never ends the history.
+ * joins message 0, and the last message is never removed, so new content never ends the history.
  */
-export function insertMarker(messages: Message[], index: number, text: string): void {
+export function insertAssistantContent(messages: Message[], index: number, content: ContentBlock[]): void {
   index = Math.max(1, Math.min(index, messages.length))
-  const block = new TextBlock(text)
   for (const neighbor of [index - 1, index]) {
     const carrier = messages[neighbor]
     if (neighbor > 0 && carrier?.role === 'assistant') {
       messages[neighbor] = new Message({
         role: 'assistant',
-        content: [...carrier.content, block],
+        content: [...carrier.content, ...content],
         trackingId: carrier.trackingId,
         ...(carrier.metadata ? { metadata: carrier.metadata } : {}),
       })
       return
     }
   }
-  messages.splice(index, 0, new Message({ role: 'assistant', content: [block] }))
+  messages.splice(index, 0, new Message({ role: 'assistant', content: [...content] }))
 }
 
 /**
@@ -413,7 +420,7 @@ export abstract class BaseOffloadStrategy implements ContextStrategy {
 
     const marker = this._makeRemovalMarker(removed)
     if (marker) {
-      insertMarker(messages, lowestIndex, marker)
+      insertAssistantContent(messages, lowestIndex, [new TextBlock(marker)])
     }
 
     repairAlternation(messages)
@@ -574,7 +581,7 @@ export class EmergencyTruncateStrategy extends BaseOffloadStrategy {
     const { removed, lowestIndex } = spliceWithPairs(messages, toRemove)
     if (removed === 0) return false
 
-    insertMarker(messages, lowestIndex, this._makeRemovalMarker(removed))
+    insertAssistantContent(messages, lowestIndex, [new TextBlock(this._makeRemovalMarker(removed))])
     repairAlternation(messages)
     return true
   }

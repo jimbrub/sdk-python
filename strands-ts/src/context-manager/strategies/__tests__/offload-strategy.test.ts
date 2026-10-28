@@ -4,7 +4,7 @@ import {
   getOldestMatches,
   buildToolNameMap,
   collectRemovableWithPair,
-  insertMarker,
+  insertAssistantContent,
   EmergencyTruncateStrategy,
 } from '../offload/base.js'
 import { Message, TextBlock, ToolResultBlock, ToolUseBlock } from '../../../types/messages.js'
@@ -816,10 +816,10 @@ describe('collectRemovableWithPair', () => {
   })
 })
 
-describe('insertMarker', () => {
+describe('insertAssistantContent', () => {
   it('inserts an assistant message between user messages', () => {
     const messages = [text('user', 'task'), text('user', 'u1')]
-    insertMarker(messages, 1, 'marker')
+    insertAssistantContent(messages, 1, [new TextBlock('marker')])
     expect(messages.map((message) => message.role)).toEqual(['user', 'assistant', 'user'])
     expect(messages[1]!.content).toEqual([new TextBlock('marker')])
   })
@@ -832,7 +832,7 @@ describe('insertMarker', () => {
       metadata: { custom: { k: 'v' } },
     })
     const messages = [text('user', 'task'), original, text('user', 'u1')]
-    insertMarker(messages, 2, 'marker')
+    insertAssistantContent(messages, 2, [new TextBlock('marker')])
     expect(messages).toHaveLength(3)
     expect(messages[1]!.content).toEqual([new TextBlock('a1'), new TextBlock('marker')])
     expect(messages[1]!.trackingId).toBe('msg-1')
@@ -842,7 +842,7 @@ describe('insertMarker', () => {
 
   it('appends to the assistant message after the gap', () => {
     const messages = [text('user', 'task'), text('assistant', 'a1'), text('user', 'u1')]
-    insertMarker(messages, 1, 'marker')
+    insertAssistantContent(messages, 1, [new TextBlock('marker')])
     expect(messages).toHaveLength(3)
     expect(messages[1]!.content).toEqual([new TextBlock('a1'), new TextBlock('marker')])
   })
@@ -852,7 +852,7 @@ describe('insertMarker', () => {
     [5, ['task', 'u1', 'marker']],
   ])('clamps index %i into the history after message 0', (index, expected) => {
     const messages = [text('user', 'task'), text('user', 'u1')]
-    insertMarker(messages, index, 'marker')
+    insertAssistantContent(messages, index, [new TextBlock('marker')])
     expect(messages.map((message) => (message.content[0] as TextBlock).text)).toEqual(expected)
   })
 })

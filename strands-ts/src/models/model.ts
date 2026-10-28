@@ -24,6 +24,7 @@ import {
   ModelMetadataEvent,
   ModelRedactionEvent,
   type ModelStreamEvent,
+  type Usage,
 } from './streaming.js'
 import { MaxTokensError, ModelError, normalizeError } from '../errors.js'
 import type { Redaction } from '../hooks/events.js'
@@ -293,6 +294,41 @@ export interface CountTokensOptions {
 }
 
 /**
+ * Options for a {@link Model.summarize} call.
+ */
+export interface SummarizeOptions {
+  /** The live conversation's system prompt, passed through unchanged. */
+  systemPrompt?: SystemPrompt
+
+  /** The live conversation's tool specifications, passed through unchanged. */
+  toolSpecs?: ToolSpec[]
+
+  /** Summarization instruction that replaces the default one. */
+  instructions?: string
+}
+
+/**
+ * Result of a {@link Model.summarize} call.
+ */
+export interface SummarizeResult {
+  /** The message that replaces the summarized messages. Its content is empty when the model wrote no summary. */
+  summary: Message
+
+  /** Token usage of the summary call, all zeros when the provider reports none. */
+  usage: Usage
+}
+
+/**
+ * Default {@link Model.summarize} instruction. Subject to change based on benchmarking.
+ *
+ * @internal
+ */
+export const DEFAULT_SUMMARIZE_INSTRUCTIONS =
+  'Stop. Do not continue the task and do not call any tools. Summarize the conversation so far for a fresh ' +
+  'context window that will replace it. Preserve key data, values, and identifiers; decisions and conclusions; ' +
+  'errors (if present); and the context needed to continue the work. Output only the summary text.'
+
+/**
  * Result interface for the streamAggregated method.
  * Contains the complete message, stop reason, and optional metadata.
  */
@@ -413,6 +449,42 @@ export abstract class Model<T extends BaseModelConfig = BaseModelConfig> {
    */
   async countTokens(messages: Message[], options?: CountTokensOptions): Promise<number> {
     return estimateTokensHeuristic(messages, options)
+  }
+
+  /**
+   * Summarizes `messages` into one message that replaces them.
+   *
+   * The caller chooses which messages to pass, places the summary, and records its usage. `messages` is non-empty,
+   * alternates roles starting with a user message, and keeps every `toolUse` with its `toolResult`. It need not be
+   * contiguous in the history: the caller leaves out pinned messages and, for a targeted summary, messages that
+   * don't match. The summary must be a user message: the caller places it among the kept messages, outside
+   * every pinned one, as a user or assistant turn.
+   *
+   * The base implementation summarizes: it is a {@link stream} call with the same system prompt, tools, and messages
+   * plus one trailing instruction, and returns the reply's text, one line per block, as a user message. The summary
+   * is empty unless the reply ends its turn or hits a stop sequence: a tool call, the output token limit, or a
+   * guardrail intervention writes none.
+   *
+   * Providers with server-side compaction override this method and send `messages` to the provider as given.
+   * The caller invokes an override only when `messages` is the conversation's first messages, in order with none
+   * left out; for any other selection it calls this base implementation directly. An override falls back to
+   * `super.summarize()` when native compaction is unavailable.
+   *
+   * @param messages - The messages to summarize, left unmodified
+   * @param options - The live system prompt and tools, and a custom summarization instruction
+   * @returns The summary message and the call's token usage. The summary never contains a tool use; its content is
+   *   empty when the model wrote no summary
+   */
+  async summarize(messages: Message[], options: SummarizeOptions = {}): Promise<SummarizeResult> {
+    const { instructions, ...streamOptions } = options
+    const request = appendInstruction(messages, instructions || DEFAULT_SUMMARIZE_INSTRUCTIONS)
+    const { reply, usage } = await readSummary(this.streamAggregated(request, streamOptions))
+    const summary = (reply?.content ?? [])
+      .flatMap(blockText)
+      .map((text) => text.trim())
+      .filter(Boolean)
+      .join('\n')
+    return { summary: new Message({ role: 'user', content: summary ? [new TextBlock(summary)] : [] }), usage }
   }
 
   /**
@@ -790,4 +862,59 @@ function heuristicJson(obj: unknown): number {
     logger.debug('unable to serialize object for token estimation, skipping')
     return 0
   }
+}
+
+/** Reads a {@link Model.streamAggregated} call; `reply` is set only when the reply is complete. */
+async function readSummary(
+  stream: AsyncGenerator<ModelStreamEvent | ContentBlock, StreamAggregatedResult, undefined>
+): Promise<{ reply?: Message; usage: Usage }> {
+  const state = { usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } }
+  try {
+    const { stopReason, message } = await drain(stream, state)
+    return COMPLETE_STOP_REASONS.has(stopReason) ? { reply: message, usage: state.usage } : { usage: state.usage }
+  } catch (error) {
+    if (writesNoSummary(error)) return { usage: state.usage }
+    throw error
+  }
+}
+
+/** Drains `stream`, keeping its last reported usage in `state`, and returns its result. */
+async function drain(
+  stream: AsyncGenerator<ModelStreamEvent | ContentBlock, StreamAggregatedResult, undefined>,
+  state: { usage: Usage }
+): Promise<StreamAggregatedResult> {
+  let next = await stream.next()
+  while (!next.done) {
+    if (next.value.type === 'modelMetadataEvent' && next.value.usage) state.usage = next.value.usage
+    next = await stream.next()
+  }
+  return next.value
+}
+
+/** Stop reasons that end a complete reply. */
+const COMPLETE_STOP_REASONS: ReadonlySet<StopReason> = new Set(['endTurn', 'stopSequence'])
+
+/** Whether `error` is a reply cut off at the output limit, or stopped on a tool call whose input does not parse. */
+function writesNoSummary(error: unknown): boolean {
+  return error instanceof MaxTokensError || (error instanceof ModelError && error.cause instanceof SyntaxError)
+}
+
+/** Returns the generated text of a text or citations block. */
+function blockText(block: ContentBlock): string[] {
+  if (block instanceof TextBlock) return [block.text]
+  if (block instanceof CitationsBlock) return block.content.map((content) => content.text)
+  return []
+}
+
+/** Returns `messages` with `instruction` as the final user turn, keeping only each message's role and content. */
+function appendInstruction(messages: Message[], instruction: string): Message[] {
+  const request = messages.map((message) => new Message({ role: message.role, content: message.content }))
+  const block = new TextBlock(instruction)
+  const last = request.at(-1)
+  if (last?.role === 'user') {
+    request[request.length - 1] = new Message({ role: 'user', content: [...last.content, block] })
+  } else {
+    request.push(new Message({ role: 'user', content: [block] }))
+  }
+  return request
 }

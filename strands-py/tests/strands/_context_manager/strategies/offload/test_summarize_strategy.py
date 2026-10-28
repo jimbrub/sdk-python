@@ -5,8 +5,11 @@ import unittest.mock
 
 import pytest
 
+from strands._context_manager.methods.summarize import _DEFAULT_BLOCK_INSTRUCTIONS
 from strands._context_manager.strategies.offload import Offload
+from strands._context_manager.strategies.offload.summarize import _compaction_split_index
 from strands._context_manager.types import ContextState
+from strands.models.model import Model, SummarizeResult
 from strands.types.content import ContentBlock, Message, Messages
 from strands.types.tools import ToolResult, ToolUse
 
@@ -78,6 +81,61 @@ class TestSummarizeStrategyPerBlock:
         result_text = messages[1]["content"][0]["toolResult"]["content"][0]["text"]
         assert "[Summarized:" in result_text
         assert "Summary of content." in result_text
+
+    @pytest.mark.asyncio
+    async def test_sends_a_block_with_the_custom_instruction_through_model_summarize_and_records_the_usage(
+        self, mock_agent
+    ):
+        received = []
+
+        async def stream(messages, tool_specs=None, system_prompt=None, **kwargs):
+            received.append((messages, tool_specs, system_prompt))
+            async for event in _make_stream_events("Summary of content.")():
+                yield event
+
+        mock_agent.model.stream = stream
+        strategy = Offload.summarize("assistant_text", {"system_prompt": "Keep ids"}).when(threshold=100)
+        messages = [_text("user", "task"), _text("assistant", "x" * 10000), _text("user", "latest")]
+        invocation_context = unittest.mock.MagicMock()
+        context = ContextState(
+            messages=messages, agent=mock_agent, utilization=0.5, invocation_context=invocation_context
+        )
+
+        assert await strategy.apply(context) is True
+        exp_request = [
+            Message(
+                role="user",
+                content=[
+                    ContentBlock(text="<content>"),
+                    ContentBlock(text="x" * 10000),
+                    ContentBlock(text="</content>"),
+                    ContentBlock(text="Keep ids"),
+                ],
+            )
+        ]
+        assert received == [(exp_request, None, None)]
+        invocation_context._record_usage.assert_called_once_with(
+            {"inputTokens": 10, "outputTokens": 5, "totalTokens": 15}
+        )
+        assert messages[1]["content"] == [
+            ContentBlock(text="[Summarized: text block, ~5,000 tokens]\n\nSummary of content.")
+        ]
+
+    @pytest.mark.asyncio
+    async def test_sends_a_block_with_the_default_block_instruction(self, mock_agent):
+        received = []
+
+        async def stream(messages, tool_specs=None, system_prompt=None, **kwargs):
+            received.append(messages)
+            async for event in _make_stream_events("Summary of content.")():
+                yield event
+
+        mock_agent.model.stream = stream
+        strategy = Offload.summarize("assistant_text").when(threshold=100)
+        messages = [_text("user", "task"), _text("assistant", "x" * 10000), _text("user", "latest")]
+
+        assert await strategy.apply(ContextState(messages=messages, agent=mock_agent, utilization=0.5)) is True
+        assert received[0][-1]["content"][-1] == ContentBlock(text=_DEFAULT_BLOCK_INSTRUCTIONS)
 
     @pytest.mark.asyncio
     async def test_summarizes_large_text_block(self, mock_agent):
@@ -231,66 +289,191 @@ class TestSummarizeStrategyPerBlock:
         assert "error=<images unsupported>" in caplog.text
 
 
+PINNED = {"custom": {"pinned": True}}
+
+
 class TestSummarizeStrategyMessageLevel:
-    """Tests for message-level summarization — only tests unique to SummarizeStrategy."""
+    """Tests for message-level summaries around pinned messages."""
 
     @pytest.mark.asyncio
-    async def test_summarizes_oldest_batch(self, mock_agent):
+    async def test_summarizes_the_messages_after_a_pinned_task_into_assistant_content_behind_it(
+        self, routing_agent, base_summarize
+    ):
         strategy = Offload.summarize("*").when(utilization=0.8)
+        task = Message(role="user", content=[ContentBlock(text="task")], metadata=PINNED)
         messages: Messages = [
-            Message(role="user", content=[ContentBlock(text="pin")]),
-            Message(role="assistant", content=[ContentBlock(text="old1")]),
-            Message(role="user", content=[ContentBlock(text="old2")]),
-            Message(role="assistant", content=[ContentBlock(text="old3")]),
-            Message(role="user", content=[ContentBlock(text="recent")]),
+            task,
+            _text("assistant", "old1"),
+            _text("user", "old2"),
+            _text("assistant", "old3"),
+            _text("user", "recent"),
         ]
-        mock_agent.messages = messages
-        context = ContextState(messages=messages, agent=mock_agent, utilization=0.9)
-        assert await strategy.apply(context) is True
-        all_text = " ".join(block.get("text", "") for msg in messages for block in msg["content"])
-        assert "[Summarized:" in all_text
+
+        assert await strategy.apply(ContextState(messages=messages, agent=routing_agent, utilization=0.9)) is True
+        exp_request = [
+            _text("user", "[Earlier conversation omitted]"),
+            _text("assistant", "old1"),
+            _text("user", "old2"),
+            _text("assistant", "old3"),
+        ]
+        routing_agent.model.summarize.assert_not_called()
+        assert base_summarize.call_args.args == (routing_agent.model, exp_request)
+        exp_summary = {**_text("assistant", "summary"), "tracking_id": unittest.mock.ANY}
+        assert messages == [task, exp_summary, _text("user", "recent")]
 
     @pytest.mark.asyncio
-    async def test_inserts_summary_and_removes_originals(self, mock_agent):
-        strategy = Offload.summarize("*").when(utilization=0.8)
-        messages: Messages = [
-            Message(role="user", content=[ContentBlock(text="pin")]),
-            Message(role="assistant", content=[ContentBlock(text="old1")]),
-            Message(role="user", content=[ContentBlock(text="old2")]),
-            Message(role="assistant", content=[ContentBlock(text="old3")]),
-            Message(role="user", content=[ContentBlock(text="old4")]),
-            Message(role="assistant", content=[ContentBlock(text="old5")]),
-            Message(role="user", content=[ContentBlock(text="recent")]),
+    async def test_keeps_the_summary_out_of_a_pinned_assistant_message_so_the_next_pass_summarizes_it(
+        self, routing_agent, base_summarize
+    ):
+        strategy = Offload.summarize("*").when(utilization=0.5)
+        task = Message(role="user", content=[ContentBlock(text="task")], metadata=PINNED)
+        ack = Message(role="assistant", content=[ContentBlock(text="ack")], metadata=PINNED)
+        messages: Messages = [task, ack, _text("user", "u2"), _text("assistant", "a3"), _text("user", "u4")]
+
+        assert await strategy.apply(ContextState(messages=messages, agent=routing_agent, utilization=0.9)) is True
+        messages += [_text("assistant", "a5"), _text("user", "u6")]
+        assert await strategy.apply(ContextState(messages=messages, agent=routing_agent, utilization=0.9)) is True
+
+        second_request = base_summarize.call_args_list[1].args[1]
+        assert second_request == [
+            {"role": "user", "content": [{"text": "summary"}, {"text": "u4"}], "tracking_id": unittest.mock.ANY},
+            _text("assistant", "a5"),
         ]
-        mock_agent.messages = messages
-        context = ContextState(messages=messages, agent=mock_agent, utilization=0.9)
-        assert await strategy.apply(context) is True
-        summary_texts = [
-            block.get("text", "")
-            for msg in messages
-            for block in msg["content"]
-            if "[Summarized:" in block.get("text", "")
+        assert [message["content"] for message in messages] == [
+            [{"text": "task"}],
+            [{"text": "ack"}],
+            [{"text": "summary"}, {"text": "u6"}],
         ]
-        assert len(summary_texts) >= 1
-        assert "5,000 tokens" in summary_texts[0]
-        assert messages[0]["content"][0]["text"] == "pin"
-        for idx in range(len(messages) - 1):
-            assert messages[idx]["role"] != messages[idx + 1]["role"]
 
     @pytest.mark.asyncio
-    async def test_preserves_alternation(self, mock_agent):
+    async def test_places_the_summary_at_a_later_gap_when_the_first_lies_between_pinned_messages(
+        self, routing_agent, base_summarize
+    ):
+        strategy = Offload.summarize("*").when(utilization=0.5, preserve_recent=1)
+        task = Message(role="user", content=[ContentBlock(text="task")], metadata=PINNED)
+        ack = Message(role="assistant", content=[ContentBlock(text="ack")], metadata=PINNED)
+        note = Message(role="user", content=[ContentBlock(text="note")], metadata=PINNED)
+        messages: Messages = [
+            task,
+            ack,
+            _text("user", "u2"),
+            _text("assistant", "a3"),
+            note,
+            _text("assistant", "a5"),
+            _text("user", "u6"),
+            _text("assistant", "a7"),
+            _text("user", "u8"),
+        ]
+
+        assert await strategy.apply(ContextState(messages=messages, agent=routing_agent, utilization=0.9)) is True
+        assert messages == [
+            task,
+            ack,
+            note,
+            {**_text("assistant", "summary"), "tracking_id": unittest.mock.ANY},
+            _text("user", "u8"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_skips_the_pass_when_every_gap_lies_between_pinned_messages_of_both_roles(
+        self, routing_agent, base_summarize
+    ):
+        strategy = Offload.summarize("*").when(utilization=0.5, preserve_recent=2)
+        task = Message(role="user", content=[ContentBlock(text="task")], metadata=PINNED)
+        answer = Message(role="assistant", content=[ContentBlock(text="answer")], metadata=PINNED, tracking_id="t3")
+        messages: Messages = [task, _text("assistant", "a1"), _text("user", "u2"), answer, _text("user", "u4")]
+        original = list(messages)
+
+        assert await strategy.apply(ContextState(messages=messages, agent=routing_agent, utilization=0.9)) is False
+        base_summarize.assert_not_called()
+        assert messages == original
+
+    @pytest.mark.asyncio
+    async def test_keeps_a_run_whose_removal_would_join_pinned_messages(self, routing_agent, base_summarize):
+        strategy = Offload.summarize("*").when(utilization=0.5)
+        first = Message(role="assistant", content=[ContentBlock(text="a1")], metadata=PINNED, tracking_id="t1")
+        second = Message(role="assistant", content=[ContentBlock(text="a3")], metadata=PINNED, tracking_id="t3")
+        messages: Messages = [_text("user", "u0"), first, _text("user", "u2"), second, _text("user", "u4")]
+
+        assert await strategy.apply(ContextState(messages=messages, agent=routing_agent, utilization=0.9)) is True
+        assert routing_agent.model.summarize.call_args.args == ([_text("user", "u0")],)
+        assert messages == [TRACKED_SUMMARY, first, _text("user", "u2"), second, _text("user", "u4")]
+
+    @pytest.mark.asyncio
+    async def test_keeps_a_targeted_run_whose_removal_would_join_a_pinned_message(self, routing_agent, base_summarize):
+        strategy = Offload.summarize("user_text").when(utilization=0.5)
+        pinned = Message(role="assistant", content=[ContentBlock(text="a5")], metadata=PINNED, tracking_id="t5")
+        messages: Messages = [
+            _text("user", "u0"),
+            _text("assistant", "a1"),
+            _text("user", "u2"),
+            _text("assistant", "a3"),
+            _text("user", "u4"),
+            pinned,
+            _text("user", "u6"),
+        ]
+
+        assert await strategy.apply(ContextState(messages=messages, agent=routing_agent, utilization=0.9)) is True
+        assert messages[-3:] == [_text("user", "u4"), pinned, _text("user", "u6")]
+
+    @pytest.mark.asyncio
+    async def test_leaves_a_lone_pinned_tool_result_unsummarized(self, routing_agent, base_summarize):
+        strategy = Offload.summarize("*").when(utilization=0.5)
+        messages: Messages = [{**_tool_result("tool-1"), "metadata": PINNED}]
+        original = list(messages)
+
+        assert await strategy.apply(ContextState(messages=messages, agent=routing_agent, utilization=0.9)) is False
+        base_summarize.assert_not_called()
+        assert messages == original
+
+    @pytest.mark.asyncio
+    async def test_leaves_a_pinned_message_before_the_cut_out_of_the_summary(self, routing_agent, base_summarize):
+        strategy = Offload.summarize("*").when(utilization=0.7, preserve_recent=2)
+        messages = _routing_history()
+        messages[2] = {**messages[2], "metadata": PINNED}
+        original = list(messages)
+
+        assert await strategy.apply(ContextState(messages=messages, agent=routing_agent, utilization=0.9)) is True
+        exp_request = [
+            _text("user", "task"),
+            {"role": "assistant", "content": [{"text": "a"}, {"text": "b"}]},
+            {"role": "user", "content": original[4]["content"]},
+        ]
+        routing_agent.model.summarize.assert_not_called()
+        assert base_summarize.call_args.args == (routing_agent.model, exp_request)
+        exp_messages = [
+            original[2],
+            {"role": "assistant", "content": [{"text": "c"}, {"text": "summary"}]},
+            original[6],
+        ]
+        assert messages == exp_messages
+
+    @pytest.mark.asyncio
+    async def test_keeps_the_message_before_a_pinned_last_message_so_the_summary_does_not_end_the_history(
+        self, routing_agent
+    ):
+        strategy = Offload.summarize("*").when(utilization=0.7, preserve_recent=1)
+        messages = _routing_history()
+        messages[6] = {**messages[6], "metadata": PINNED}
+        original = list(messages)
+
+        assert await strategy.apply(ContextState(messages=messages, agent=routing_agent, utilization=0.9)) is True
+        assert routing_agent.model.summarize.call_args.args == (original[:5],)
+        assert messages == [TRACKED_SUMMARY, *original[5:]]
+
+    @pytest.mark.asyncio
+    async def test_preserves_alternation(self, routing_agent):
         strategy = Offload.summarize("*").when(utilization=0.8)
         messages: Messages = [
-            Message(role="user", content=[ContentBlock(text="pin")]),
+            Message(role="user", content=[ContentBlock(text="pin")], metadata=PINNED),
             Message(role="assistant", content=[ContentBlock(text="a1")]),
             Message(role="user", content=[ContentBlock(text="u2")]),
             Message(role="assistant", content=[ContentBlock(text="a2")]),
             Message(role="user", content=[ContentBlock(text="u3")]),
             Message(role="assistant", content=[ContentBlock(text="a3")]),
         ]
-        mock_agent.messages = messages
-        context = ContextState(messages=messages, agent=mock_agent, utilization=0.9)
-        await strategy.apply(context)
+        context = ContextState(messages=messages, agent=routing_agent, utilization=0.9)
+        assert await strategy.apply(context) is True
         for idx in range(len(messages) - 1):
             assert messages[idx]["role"] != messages[idx + 1]["role"]
 
@@ -307,84 +490,330 @@ class TestSummarizeStrategyMessageLevel:
         context = ContextState(messages=messages, agent=agent, utilization=0.9)
         assert await strategy.apply(context) is False
 
-    @pytest.mark.asyncio
-    async def test_summary_returns_none_falls_back_to_false(self, mock_agent):
-        mock_agent.model.stream = _make_empty_stream()
-        strategy = Offload.summarize("*").when(utilization=0.8)
-        messages: Messages = [
-            Message(role="user", content=[ContentBlock(text="pin")]),
-            Message(role="assistant", content=[ContentBlock(text="old1")]),
-            Message(role="user", content=[ContentBlock(text="old2")]),
-            Message(role="assistant", content=[ContentBlock(text="old3")]),
-            Message(role="user", content=[ContentBlock(text="recent")]),
-        ]
-        mock_agent.messages = messages
-        context = ContextState(messages=messages, agent=mock_agent, utilization=0.9)
-        assert await strategy.apply(context) is False
-
 
 class TestRepeatedSummarizationKeepsMessageZeroVerbatim:
     """Regression test for https://github.com/strands-agents/harness-sdk/issues/4685."""
 
     @pytest.mark.asyncio
-    async def test_summaries_stay_out_of_pinned_message_zero(self, mock_agent):
+    async def test_summaries_stay_out_of_pinned_message_zero(self, routing_agent):
         strategy = Offload.summarize("*").when(utilization=0.7, preserve_recent=4)
-        messages: Messages = [
-            Message(role="user", content=[ContentBlock(text="task")], metadata={"custom": {"pinned": True}})
-        ]
+        task = Message(role="user", content=[ContentBlock(text="task")], metadata={"custom": {"pinned": True}})
+        messages: Messages = [task]
         for index in range(30):
-            tool_use = ToolUse(toolUseId=f"t{index}", name="read", input={})
-            tool_result = ToolResult(toolUseId=f"t{index}", status="success", content=[{"text": "x"}])
-            messages.append(Message(role="assistant", content=[ContentBlock(toolUse=tool_use)]))
-            messages.append(Message(role="user", content=[ContentBlock(toolResult=tool_result)]))
-            await strategy.apply(ContextState(messages=messages, agent=mock_agent, utilization=0.9))
+            messages.append(_tool_use(f"t{index}"))
+            messages.append(_tool_result(f"t{index}"))
+            await strategy.apply(ContextState(messages=messages, agent=routing_agent, utilization=0.9))
         assert messages[0] == Message(
             role="user", content=[ContentBlock(text="task")], metadata={"custom": {"pinned": True}}
         )
-        summaries = [b for msg in messages for b in msg["content"] if b.get("text", "").startswith("[Summarized:")]
+        summaries = [block for message in messages for block in message["content"] if block == {"text": "summary"}]
         assert len(summaries) == 1
 
 
 class TestSummarizationWithToolCalls:
-    """Regression test for https://github.com/strands-agents/harness-sdk/issues/5291."""
+    """Guards against tool calls being dropped from or split from their results in the summary request (#5291)."""
 
     @pytest.mark.asyncio
-    async def test_summarizes_tool_calls_as_text_in_a_single_model_call(self, mock_agent):
-        tru_calls: list[Messages] = []
-        summary_stream = _make_stream_events("Listed the files")
-
-        def recording_stream(messages, *args, **kwargs):
-            tru_calls.append(messages)
-            return summary_stream(messages, *args, **kwargs)
-
-        mock_agent.model.stream = recording_stream
+    async def test_sends_tool_calls_with_their_results_and_the_live_tools_to_summarize(
+        self, routing_agent, base_summarize
+    ):
         strategy = Offload.summarize("*").when(utilization=0.7, preserve_recent=2)
         tool_use = ToolUse(toolUseId="call_1", name="shell", input={"command": "ls"})
         tool_result = ToolResult(toolUseId="call_1", status="success", content=[{"text": "a.ts b.ts"}])
         messages: Messages = [
-            Message(role="user", content=[ContentBlock(text="fix the build")]),
+            Message(role="user", content=[ContentBlock(text="fix the build")], metadata=PINNED),
             Message(role="assistant", content=[ContentBlock(toolUse=tool_use)]),
             Message(role="user", content=[ContentBlock(toolResult=tool_result)]),
             Message(role="assistant", content=[ContentBlock(text="done")]),
             Message(role="user", content=[ContentBlock(text="next")]),
         ]
-        mock_agent.messages = messages
 
-        assert await strategy.apply(ContextState(messages=messages, agent=mock_agent, utilization=0.9)) is True
-        exp_calls = [
-            [
-                Message(
-                    role="user",
-                    content=[
-                        ContentBlock(text="<content>"),
-                        ContentBlock(text="\n---\n[assistant]"),
-                        ContentBlock(text='[tool call: shell] {"command":"ls"}'),
-                        ContentBlock(text="\n---\n[user]"),
-                        ContentBlock(text="[tool result: shell]"),
-                        ContentBlock(text="a.ts b.ts"),
-                        ContentBlock(text="</content>"),
-                    ],
-                )
-            ]
+        assert await strategy.apply(ContextState(messages=messages, agent=routing_agent, utilization=0.9)) is True
+        exp_request = [
+            _text("user", "[Earlier conversation omitted]"),
+            Message(role="assistant", content=[ContentBlock(toolUse=tool_use)]),
+            Message(role="user", content=[ContentBlock(toolResult=tool_result)]),
         ]
-        assert tru_calls == exp_calls
+        base_summarize.assert_awaited_once_with(
+            routing_agent.model,
+            exp_request,
+            tool_specs=[{"name": "read"}],
+            system_prompt="live system prompt",
+            system_prompt_content=[{"text": "live system prompt"}],
+            instructions=None,
+        )
+
+
+def _large_result(tool_use_id: str) -> Message:
+    return Message(
+        role="user",
+        content=[
+            ContentBlock(
+                toolResult=ToolResult(toolUseId=tool_use_id, status="success", content=[{"text": "x" * 10000}])
+            )
+        ],
+    )
+
+
+def _routing_history() -> Messages:
+    return [
+        Message(role="user", content=[ContentBlock(text="task")]),
+        Message(role="assistant", content=[ContentBlock(text="a")]),
+        _large_result("tool-1"),
+        Message(role="assistant", content=[ContentBlock(text="b")]),
+        _large_result("tool-2"),
+        Message(role="assistant", content=[ContentBlock(text="c")]),
+        Message(role="user", content=[ContentBlock(text="latest")]),
+    ]
+
+
+SUMMARY = Message(role="user", content=[ContentBlock(text="summary")])
+TRACKED_SUMMARY = {**SUMMARY, "tracking_id": unittest.mock.ANY}
+USAGE = {"inputTokens": 10, "outputTokens": 5, "totalTokens": 15}
+
+
+@pytest.fixture
+def base_summarize():
+    with unittest.mock.patch.object(
+        Model, "summarize", unittest.mock.AsyncMock(return_value=SummarizeResult(summary=SUMMARY, usage=USAGE))
+    ) as base_summarize:
+        yield base_summarize
+
+
+@pytest.fixture
+def routing_agent(mock_agent, base_summarize):
+    mock_agent.tool_registry.get_all_tool_specs.return_value = [{"name": "read"}]
+    mock_agent.system_prompt = "live system prompt"
+    mock_agent.system_prompt_content = [{"text": "live system prompt"}]
+    mock_agent.model.summarize = unittest.mock.AsyncMock(return_value=SummarizeResult(summary=SUMMARY, usage=USAGE))
+    return mock_agent
+
+
+class TestSummarizeStrategyRouting:
+    """Tests for which summaries go through Model.summarize."""
+
+    @pytest.mark.asyncio
+    async def test_sends_a_whole_history_message_level_summary_through_summarize(self, routing_agent):
+        strategy = Offload.summarize("*", {"system_prompt": "Keep ids"}).when(utilization=0.7, preserve_recent=2)
+        messages = _routing_history()
+        original = list(messages)
+
+        assert await strategy.apply(ContextState(messages=messages, agent=routing_agent, utilization=0.5)) is False
+        routing_agent.model.summarize.assert_not_called()
+
+        context = ContextState(messages=messages, agent=routing_agent, utilization=0.5, overflow=True)
+        assert await strategy.apply(context) is True
+        routing_agent.model.summarize.assert_awaited_once_with(
+            original[:5],
+            tool_specs=[{"name": "read"}],
+            system_prompt="live system prompt",
+            system_prompt_content=[{"text": "live system prompt"}],
+            instructions="Keep ids",
+        )
+        assert messages == [TRACKED_SUMMARY, *original[5:]]
+
+    @pytest.mark.asyncio
+    async def test_records_the_compaction_usage_on_the_invocation_context(self, routing_agent):
+        invocation_context = unittest.mock.MagicMock()
+        strategy = Offload.summarize("*").when(utilization=0.7, preserve_recent=2)
+        context = ContextState(
+            messages=_routing_history(), agent=routing_agent, utilization=0.9, invocation_context=invocation_context
+        )
+
+        assert await strategy.apply(context) is True
+        invocation_context._record_usage.assert_called_once_with(USAGE)
+
+    @pytest.mark.asyncio
+    async def test_sends_a_prefix_opening_with_an_assistant_turn_through_base_summarize(
+        self, routing_agent, base_summarize
+    ):
+        messages = _routing_history()[1:]
+        original = list(messages)
+        strategy = Offload.summarize("*").when(utilization=0.7, preserve_recent=2)
+
+        assert await strategy.apply(ContextState(messages=messages, agent=routing_agent, utilization=0.9)) is True
+        routing_agent.model.summarize.assert_not_called()
+        exp_request = [_text("user", "[Earlier conversation omitted]"), *original[:4]]
+        assert base_summarize.call_args.args == (routing_agent.model, exp_request)
+        assert messages == [TRACKED_SUMMARY, *original[4:]]
+
+    @pytest.mark.asyncio
+    async def test_moves_a_cut_on_a_tool_pair_forward(self, routing_agent):
+        messages = [
+            Message(role="user", content=[ContentBlock(text="task")]),
+            _text("assistant", "a"),
+            _text("user", "b"),
+            _tool_use("tool-1"),
+            _tool_result("tool-1"),
+            _text("assistant", "c"),
+            _text("user", "latest"),
+        ]
+        original = list(messages)
+        strategy = Offload.summarize("*").when(utilization=0.7, preserve_recent=3)
+
+        assert await strategy.apply(ContextState(messages=messages, agent=routing_agent, utilization=0.9)) is True
+        assert routing_agent.model.summarize.call_args.args == (original[:5],)
+        assert messages == [TRACKED_SUMMARY, *original[5:]]
+
+    @pytest.mark.asyncio
+    async def test_merges_same_role_messages_at_the_join(self, routing_agent):
+        messages = _routing_history()
+        original = list(messages)
+        strategy = Offload.summarize("*").when(utilization=0.7, preserve_recent=1)
+
+        assert await strategy.apply(ContextState(messages=messages, agent=routing_agent, utilization=0.9)) is True
+        assert routing_agent.model.summarize.call_args.args == (original[:6],)
+        exp_messages = [
+            {
+                "role": "user",
+                "content": [ContentBlock(text="summary"), ContentBlock(text="latest")],
+                "tracking_id": unittest.mock.ANY,
+            }
+        ]
+        assert messages == exp_messages
+
+    @pytest.mark.asyncio
+    async def test_leaves_the_history_unchanged_and_warns_when_summarize_writes_no_summary(self, routing_agent, caplog):
+        routing_agent.model.summarize.return_value = SummarizeResult(
+            summary=Message(role="user", content=[]), usage=USAGE
+        )
+        invocation_context = unittest.mock.MagicMock()
+        strategy = Offload.summarize("*").when(utilization=0.7)
+        messages = _routing_history()
+        context = ContextState(
+            messages=messages, agent=routing_agent, utilization=0.9, invocation_context=invocation_context
+        )
+
+        with caplog.at_level(logging.WARNING):
+            assert await strategy.apply(context) is False
+
+        assert messages == _routing_history()
+        invocation_context._record_usage.assert_called_once_with(USAGE)
+        assert "model summarize returned no summary" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_passes_no_instruction_without_a_custom_system_prompt(self, routing_agent):
+        strategy = Offload.summarize("*").when(utilization=0.7, preserve_recent=2)
+
+        assert await strategy.apply(ContextState(messages=_routing_history(), agent=routing_agent, utilization=0.9))
+        routing_agent.model.summarize.assert_awaited_once_with(
+            _routing_history()[:5],
+            tool_specs=[{"name": "read"}],
+            system_prompt="live system prompt",
+            system_prompt_content=[{"text": "live system prompt"}],
+            instructions=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_second_pass_over_the_compacted_history_is_a_no_op(self, routing_agent):
+        messages = [_text("user" if index % 2 == 0 else "assistant", f"m{index}") for index in range(9)]
+        strategy = Offload.summarize("*").when(utilization=0.7, preserve_recent=4)
+
+        tru_acted = [
+            await strategy.apply(ContextState(messages=messages, agent=routing_agent, utilization=0.9))
+            for _ in range(3)
+        ]
+
+        assert tru_acted == [True, False, False]
+        routing_agent.model.summarize.assert_awaited_once()
+        assert messages == [
+            TRACKED_SUMMARY,
+            *[_text("assistant" if index % 2 else "user", f"m{index}") for index in range(5, 9)],
+        ]
+
+    @pytest.mark.asyncio
+    async def test_sends_a_target_filtered_summary_through_base_summarize_with_the_selected_tool_pairs(
+        self, routing_agent, base_summarize
+    ):
+        strategy = Offload.summarize("tool_results").when(utilization=0.7)
+        messages = [
+            _text("user", "task"),
+            _tool_use("t1"),
+            _tool_result("t1"),
+            _text("assistant", "a"),
+            _text("user", "u"),
+            _tool_use("t2"),
+            _tool_result("t2"),
+            _text("assistant", "b"),
+            _text("user", "latest"),
+        ]
+        original = list(messages)
+
+        assert await strategy.apply(ContextState(messages=messages, agent=routing_agent, utilization=0.9)) is True
+        exp_request = [_text("user", "[Earlier conversation omitted]"), *original[1:3], *original[5:7]]
+        routing_agent.model.summarize.assert_not_called()
+        assert base_summarize.call_args.args == (routing_agent.model, exp_request)
+        exp_messages = [
+            original[0],
+            {"role": "assistant", "content": [{"text": "a"}, {"text": "summary"}]},
+            original[4],
+            original[7],
+            original[8],
+        ]
+        assert messages == exp_messages
+
+    @pytest.mark.asyncio
+    async def test_sends_a_threshold_summary_through_base_summarize(self, routing_agent, base_summarize):
+        strategy = Offload.summarize("*").when(utilization=0.7, threshold=10)
+        messages = _routing_history()
+        original = list(messages)
+
+        assert await strategy.apply(ContextState(messages=messages, agent=routing_agent, utilization=0.9)) is True
+        exp_request = [_text("user", "[Earlier conversation omitted]"), *original[1:6]]
+        routing_agent.model.summarize.assert_not_called()
+        assert base_summarize.call_args.args == (routing_agent.model, exp_request)
+        exp_summary = {**_text("assistant", "summary"), "tracking_id": unittest.mock.ANY}
+        assert messages == [original[0], exp_summary, original[6]]
+
+
+def _text(role, text):
+    return {"role": role, "content": [{"text": text}]}
+
+
+def _tool_use(tool_use_id):
+    return {"role": "assistant", "content": [{"toolUse": {"toolUseId": tool_use_id, "name": "read", "input": {}}}]}
+
+
+def _tool_result(tool_use_id):
+    return {
+        "role": "user",
+        "content": [{"toolResult": {"toolUseId": tool_use_id, "status": "success", "content": [{"text": "ok"}]}}],
+    }
+
+
+class TestCompactionSplitIndex:
+    def test_keeps_a_count_or_ratio_of_trailing_messages_and_never_cuts_past_the_last_message(self):
+        messages = [
+            _text("user", "a"),
+            _text("assistant", "b"),
+            _text("user", "c"),
+            _text("assistant", "d"),
+            _text("user", "e"),
+        ]
+
+        tru_splits = [
+            _compaction_split_index(messages, 2),
+            _compaction_split_index(messages, 0.5),
+            _compaction_split_index(messages, 0),
+            _compaction_split_index(messages, 5),
+            _compaction_split_index(messages, 9),
+            _compaction_split_index(messages, 4),
+            _compaction_split_index([], 0),
+            _compaction_split_index(messages[:1], 0),
+            _compaction_split_index(messages[:2], 0),
+            _compaction_split_index(messages[:3], 0),
+        ]
+
+        assert tru_splits == [3, 2, 4, 0, 0, 0, 0, 0, 0, 2]
+
+    def test_moves_the_cut_forward_so_a_tool_use_stays_with_its_tool_result_or_back_when_the_result_is_last(self):
+        messages = [_text("user", "task"), _tool_use("a"), _tool_result("a"), _tool_use("b"), _tool_result("b")]
+
+        tru_splits = [_compaction_split_index(messages, kept) for kept in (2, 3, 0)]
+
+        assert tru_splits == [3, 3, 3]
+
+    def test_does_not_cut_when_moving_the_cut_back_off_a_tool_pair_leaves_one_message(self):
+        messages = [_text("user", "task"), _tool_use("a"), _tool_result("a")]
+
+        assert _compaction_split_index(messages, 0) == 0

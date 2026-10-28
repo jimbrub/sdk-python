@@ -14,7 +14,8 @@ from pydantic import BaseModel
 
 from ..hooks.events import AfterInvocationEvent
 from ..plugins.plugin import Plugin
-from ..types.content import ContentBlock, Messages, SystemContentBlock
+from ..types.content import ContentBlock, Message, Messages, SystemContentBlock
+from ..types.event_loop import Usage
 from ..types.streaming import StreamEvent
 from ..types.tools import ToolChoice, ToolSpec
 from ._defaults import DEFAULT_CONTEXT_WINDOW_LIMIT
@@ -184,6 +185,28 @@ class CacheToolsConfig:
     ttl: str | None = None
 
 
+# Subject to change based on benchmarking.
+_DEFAULT_SUMMARIZE_INSTRUCTIONS = (
+    "Stop. Do not continue the task and do not call any tools. Summarize the conversation so far for a fresh "
+    "context window that will replace it. Preserve key data, values, and identifiers; decisions and conclusions; "
+    "errors (if present); and the context needed to continue the work. Output only the summary text."
+)
+
+
+@dataclass
+class SummarizeResult:
+    """Result of a :meth:`Model.summarize` call.
+
+    Attributes:
+        summary: The message that replaces the summarized messages. Its content is empty when the model wrote
+            no summary.
+        usage: Token usage of the summary call, all zeros when the provider reports none.
+    """
+
+    summary: Message
+    usage: Usage
+
+
 class Model(abc.ABC):
     """Abstract base class for Agent model providers.
 
@@ -334,6 +357,52 @@ class Model(abc.ABC):
         """
         return _estimate_tokens_with_heuristic(messages, tool_specs, system_prompt, system_prompt_content)
 
+    async def summarize(
+        self,
+        messages: Messages,
+        *,
+        tool_specs: list[ToolSpec] | None = None,
+        system_prompt: str | None = None,
+        system_prompt_content: list[SystemContentBlock] | None = None,
+        instructions: str | None = None,
+        **kwargs: Any,
+    ) -> SummarizeResult:
+        """Summarize ``messages`` into one message that replaces them.
+
+        The caller chooses which messages to pass, places the summary, and records its usage. ``messages`` is
+        non-empty, alternates roles starting with a user message, and keeps every ``toolUse`` with its ``toolResult``.
+        It need not be contiguous in the history: the caller leaves out pinned messages and, for a targeted summary,
+        messages that don't match. The summary must be a user message: the caller places it among the kept
+        messages, outside every pinned one, as a user or assistant turn.
+
+        The base implementation summarizes: it is a :meth:`stream` call with the same system prompt, tools, and messages
+        plus one trailing instruction, and returns the reply's text, one line per block, as a user message. The summary
+        is empty unless the reply ends its turn or hits a stop sequence: a tool call, the output token limit, or a
+        guardrail intervention writes none.
+
+        Providers with server-side compaction override this method and send ``messages`` to the provider as given.
+        The caller invokes an override only when ``messages`` is the conversation's first messages, in order with none
+        left out; for any other selection it calls this base implementation directly. An override falls back to
+        ``super().summarize()`` when native compaction is unavailable.
+
+        Args:
+            messages: The messages to summarize, left unmodified.
+            tool_specs: The live conversation's tool specifications, passed through unchanged.
+            system_prompt: The live conversation's plain string system prompt, passed through unchanged.
+            system_prompt_content: The live conversation's structured system prompt, passed through unchanged.
+            instructions: Summarization instruction that replaces the default one.
+            **kwargs: Additional keyword arguments for future extensibility.
+
+        Returns:
+            The summary message and the call's token usage. The summary never contains a tool use; its content is
+            empty when the model wrote no summary.
+        """
+        request = _append_instruction(messages, instructions or _DEFAULT_SUMMARIZE_INSTRUCTIONS)
+        events = self.stream(request, tool_specs, system_prompt, system_prompt_content=system_prompt_content)
+        summary, usage = await _read_summary(events)
+        content = [ContentBlock(text=summary)] if summary else []
+        return SummarizeResult(summary=Message(role="user", content=content), usage=usage)
+
     def estimate_utilization(self, input_tokens: int) -> float:
         """Estimate the fraction of the model's context window consumed by the given input token count.
 
@@ -389,3 +458,34 @@ class _ModelPlugin(Plugin):
             agent: The agent instance to register hooks with.
         """
         agent.add_hook(self._on_after_invocation, AfterInvocationEvent)
+
+
+async def _read_summary(events: AsyncIterable[StreamEvent]) -> tuple[str, Usage]:
+    """Return the reply's text, one line per block, or "" unless the reply is complete, and the call's usage."""
+    blocks: list[str] = [""]
+    stop_reason = None
+    usage = Usage(inputTokens=0, outputTokens=0, totalTokens=0)
+    async for event in events:
+        if "contentBlockDelta" in event:
+            blocks[-1] += event["contentBlockDelta"]["delta"].get("text", "")
+        elif "contentBlockStop" in event:
+            blocks.append("")
+        elif "messageStop" in event:
+            stop_reason = event["messageStop"]["stopReason"]
+        elif "metadata" in event:
+            usage = event["metadata"].get("usage", usage)
+
+    if stop_reason not in ("end_turn", "stop_sequence"):
+        return "", usage
+    return "\n".join(block.strip() for block in blocks if block.strip()), usage
+
+
+def _append_instruction(messages: Messages, instruction: str) -> Messages:
+    """Return ``messages`` with ``instruction`` as the final user turn, keeping only each message's role and content."""
+    request = [Message(role=message["role"], content=message["content"]) for message in messages]
+    block = ContentBlock(text=instruction)
+    if request and request[-1]["role"] == "user":
+        request[-1] = Message(role="user", content=[*request[-1]["content"], block])
+    else:
+        request.append(Message(role="user", content=[block]))
+    return request

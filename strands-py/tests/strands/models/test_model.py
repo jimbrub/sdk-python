@@ -1,5 +1,6 @@
 import json
 import math
+import unittest.mock
 import warnings
 from unittest.mock import MagicMock
 
@@ -9,7 +10,7 @@ from pydantic import BaseModel
 from strands.hooks.events import AfterInvocationEvent
 from strands.models import CacheConfig
 from strands.models import Model as SAModel
-from strands.models.model import _ModelPlugin
+from strands.models.model import _DEFAULT_SUMMARIZE_INSTRUCTIONS, SummarizeResult, _ModelPlugin
 
 
 class Person(BaseModel):
@@ -694,3 +695,131 @@ class TestCacheConfig:
     def test_cache_key_round_trips(self):
         """cache_key preserves the value it was constructed with."""
         assert CacheConfig(cache_key="tenant-42").cache_key == "tenant-42"
+
+
+def _text(role, text):
+    return {"role": role, "content": [{"text": text}]}
+
+
+def _recording_stream(received, *texts, stop_reason="end_turn"):
+    async def stream(messages, tool_specs=None, system_prompt=None, **kwargs):
+        received.append((messages, tool_specs, system_prompt, kwargs))
+        yield {"messageStart": {"role": "assistant"}}
+        for text in texts:
+            yield {"contentBlockDelta": {"delta": {"text": text}}}
+            yield {"contentBlockStop": {}}
+        if stop_reason is not None:
+            yield {"messageStop": {"stopReason": stop_reason}}
+        yield {"metadata": {"usage": {"inputTokens": 10, "outputTokens": 15, "totalTokens": 25}, "metrics": {}}}
+
+    return stream
+
+
+class TestSummarize:
+    @pytest.mark.asyncio
+    async def test_streams_the_messages_with_the_instruction_in_the_trailing_user_turn_and_returns_summary_and_usage(
+        self, model, tool_specs
+    ):
+        messages = [_text("user", "task"), _text("assistant", "answer"), _text("user", "follow up")]
+        messages[0]["metadata"] = {"custom": {"pinned": True}}
+        original = [dict(message) for message in messages]
+        received = []
+
+        with unittest.mock.patch.object(model, "stream", _recording_stream(received, " the summary ")):
+            tru_result = await model.summarize(
+                messages,
+                tool_specs=tool_specs,
+                system_prompt="live prompt",
+                system_prompt_content=[{"text": "live prompt"}],
+                instructions="Keep ids",
+            )
+
+        exp_request = [
+            _text("user", "task"),
+            _text("assistant", "answer"),
+            {
+                "role": "user",
+                "content": [{"text": "follow up"}, {"text": "Keep ids"}],
+            },
+        ]
+        assert received == [
+            (exp_request, tool_specs, "live prompt", {"system_prompt_content": [{"text": "live prompt"}]})
+        ]
+        assert tru_result == SummarizeResult(
+            summary={"role": "user", "content": [{"text": "the summary"}]},
+            usage={"inputTokens": 10, "outputTokens": 15, "totalTokens": 25},
+        )
+        assert messages == original
+
+    @pytest.mark.asyncio
+    async def test_appends_the_default_instruction_as_a_user_turn_after_an_assistant_message(self, model):
+        messages = [_text("user", "task"), _text("assistant", "answer")]
+        received = []
+
+        with unittest.mock.patch.object(model, "stream", _recording_stream(received, "summary")):
+            await model.summarize(messages)
+
+        exp_request = [*messages, _text("user", _DEFAULT_SUMMARIZE_INSTRUCTIONS)]
+        assert received == [(exp_request, None, None, {"system_prompt_content": None})]
+
+    @pytest.mark.asyncio
+    async def test_returns_an_empty_summary_with_the_usage_when_the_model_writes_no_text(self, model):
+        with unittest.mock.patch.object(model, "stream", _recording_stream([], "  ")):
+            tru_result = await model.summarize([_text("user", "task")])
+
+        assert tru_result == SummarizeResult(
+            summary={"role": "user", "content": []},
+            usage={"inputTokens": 10, "outputTokens": 15, "totalTokens": 25},
+        )
+
+    @pytest.mark.asyncio
+    async def test_joins_text_blocks_with_newlines_and_skips_non_text_deltas(self, model):
+        async def stream(messages, tool_specs=None, system_prompt=None, **kwargs):
+            yield {"contentBlockDelta": {"delta": {"reasoningContent": {"text": "thinking"}}}}
+            yield {"contentBlockStop": {}}
+            for text in ("first", "  "):
+                yield {"contentBlockDelta": {"delta": {"text": text}}}
+                yield {"contentBlockStop": {}}
+            yield {"contentBlockDelta": {"delta": {"toolUse": {"input": "{}"}}}}
+            yield {"contentBlockStop": {}}
+            yield {"contentBlockDelta": {"delta": {"text": "second"}}}
+            yield {"contentBlockStop": {}}
+            yield {"messageStop": {"stopReason": "end_turn"}}
+
+        with unittest.mock.patch.object(model, "stream", stream):
+            tru_result = await model.summarize([_text("user", "task")])
+
+        exp_result = SummarizeResult(
+            summary={"role": "user", "content": [{"text": "first\nsecond"}]},
+            usage={"inputTokens": 0, "outputTokens": 0, "totalTokens": 0},
+        )
+        assert tru_result == exp_result
+
+    @pytest.mark.asyncio
+    async def test_returns_the_summary_when_the_reply_stops_at_a_stop_sequence(self, model):
+        stream = _recording_stream([], "the summary", stop_reason="stop_sequence")
+
+        with unittest.mock.patch.object(model, "stream", stream):
+            tru_result = await model.summarize([_text("user", "task")])
+
+        exp_result = SummarizeResult(
+            summary={"role": "user", "content": [{"text": "the summary"}]},
+            usage={"inputTokens": 10, "outputTokens": 15, "totalTokens": 25},
+        )
+        assert tru_result == exp_result
+
+    @pytest.mark.parametrize("stop_reason", ["max_tokens", "tool_use", "guardrail_intervened", None])
+    @pytest.mark.asyncio
+    async def test_returns_an_empty_summary_with_the_usage_when_the_reply_does_not_end_its_turn(
+        self, model, stop_reason
+    ):
+        stream = _recording_stream([], "Let me check first.", stop_reason=stop_reason)
+
+        with unittest.mock.patch.object(model, "stream", stream):
+            tru_result = await model.summarize([_text("user", "task")])
+
+        exp_result = SummarizeResult(
+            summary={"role": "user", "content": []},
+            usage={"inputTokens": 10, "outputTokens": 15, "totalTokens": 25},
+        )
+        assert tru_result == exp_result

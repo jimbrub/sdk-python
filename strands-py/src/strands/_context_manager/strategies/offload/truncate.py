@@ -15,7 +15,7 @@ from .base import (
     OffloadConditions,
     OffloadTarget,
     _build_conditions,
-    _insert_marker,
+    _insert_assistant_content,
     _repair_alternation,
     _splice_with_pairs,
 )
@@ -169,6 +169,6 @@ class EmergencyTruncateStrategy(TruncateStrategy):
         if removed == 0:
             return False
 
-        _insert_marker(messages, lowest_index, self._make_removal_marker(removed))
+        _insert_assistant_content(messages, lowest_index, [ContentBlock(text=self._make_removal_marker(removed))])
         _repair_alternation(messages)
         return True
