@@ -181,6 +181,20 @@ function placeSummary(messages: Message[], indices: number[], slot: SummarySlot,
   repairAlternation(messages)
 }
 
+/**
+ * Returns a text summary as one block under a `[Summarized: ...]` header for the `summarized` messages.
+ *
+ * A summary holding other content, such as an override's provider-native compaction block, is returned unchanged:
+ * the provider needs it back as it sent it.
+ */
+async function withSummarizedMarker(summary: Message, summarized: Message[], model: Model): Promise<Message> {
+  if (!summary.content.every((block) => block instanceof TextBlock)) return summary
+  const tokens = await model.countTokens(summarized)
+  const text = summary.content.map((block) => (block as TextBlock).text).join('\n')
+  const marker = formatSummarized(`${summarized.length} messages`, tokens, text)
+  return new Message({ role: summary.role, content: [new TextBlock(marker)] })
+}
+
 /** Returns the index of the kept message the summary appends to, or undefined when it stands alone or leads. */
 function carrierIndex(messages: Message[], position: number, role: Role): number | undefined {
   if (position > 1 && messages[position - 1]!.role === role) return position - 1
@@ -240,7 +254,8 @@ export class SummarizeStrategy extends BaseOffloadStrategy {
     }
     const { indices, slot } = plan
 
-    const request = compactionRequest(indices.map((index) => messages[index]!))
+    const summarized = indices.map((index) => messages[index]!)
+    const request = compactionRequest(summarized)
     const options = this._summarizeOptions(agent)
     // Server-side compaction replaces the start of the conversation, so a provider override only gets the
     // conversation's first messages, opening with its own user turn; any other selection gets the base summary.
@@ -254,7 +269,7 @@ export class SummarizeStrategy extends BaseOffloadStrategy {
       return false
     }
 
-    placeSummary(messages, indices, slot, result.summary)
+    placeSummary(messages, indices, slot, await withSummarizedMarker(result.summary, summarized, model))
     logger.debug(`summarized=<${indices.length}> | compacted messages`)
     return true
   }

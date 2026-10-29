@@ -173,6 +173,20 @@ def _place_summary(messages: Messages, indices: list[int], slot: tuple[int, Role
     _repair_alternation(messages)
 
 
+async def _with_summarized_marker(summary: Message, summarized: Messages, model: Model) -> Message:
+    """Return a text summary as one block under a ``[Summarized: ...]`` header for the ``summarized`` messages.
+
+    A summary holding other content, such as an override's provider-native compaction block, is returned unchanged:
+    the provider needs it back as it sent it.
+    """
+    if not all("text" in block for block in summary["content"]):
+        return summary
+    tokens = await model.count_tokens(summarized)
+    text = "\n".join(block["text"] for block in summary["content"])
+    marker = _format_summarized(f"{len(summarized)} messages", tokens, text)
+    return Message(role=summary["role"], content=[ContentBlock(text=marker)])
+
+
 def _carrier(messages: Messages, position: int, role: Role) -> int | None:
     """Return the index of the kept message the summary appends to, or None when it stands alone or leads."""
     if position > 1 and messages[position - 1]["role"] == role:
@@ -249,13 +263,14 @@ class SummarizeStrategy(BaseOffloadStrategy):
             return False
         indices, slot = plan
         agent = context.agent
+        selected = [messages[index] for index in indices]
 
         # Server-side compaction replaces the start of the conversation, so a provider override only gets the
         # conversation's first messages, opening with its own user turn; any other selection gets the base summary.
         prefix = indices == list(range(len(indices))) and messages[0]["role"] == "user"
         summarize = model.summarize if prefix else functools.partial(Model.summarize, model)
         result = await summarize(
-            _compaction_request([messages[index] for index in indices]),
+            _compaction_request(selected),
             # A server-side compaction must carry the live system prompt and tools, or the provider
             # treats it as a different conversation.
             tool_specs=agent.tool_registry.get_all_tool_specs(),
@@ -271,7 +286,8 @@ class SummarizeStrategy(BaseOffloadStrategy):
             )
             return False
 
-        _place_summary(messages, indices, slot, result.summary)
+        summary = await _with_summarized_marker(result.summary, selected, model)
+        _place_summary(messages, indices, slot, summary)
         logger.debug("summarized=<%s> | compacted messages", len(indices))
         return True
 

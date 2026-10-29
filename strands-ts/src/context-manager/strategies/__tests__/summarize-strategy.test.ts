@@ -348,7 +348,7 @@ describe('repeated summarization', () => {
     expect(messages[0]!.metadata).toEqual(task().metadata)
     const summaries = messages
       .flatMap((message) => message.content)
-      .filter((block) => block instanceof TextBlock && block.text === 'Summary')
+      .filter((block) => block instanceof TextBlock && block.text.startsWith('[Summarized:'))
     expect(summaries).toHaveLength(1)
   })
 })
@@ -383,6 +383,11 @@ describe('routing through Model.summarize', () => {
   const toolUse = (id: string): Message =>
     new Message({ role: 'assistant', content: [new ToolUseBlock({ toolUseId: id, name: 'read', input: {} })] })
   const summary = text('user', 'summary')
+  /** The summary block placed for `count` messages, which `mockSummarize` counts as 5,000 tokens. */
+  const marked = (count: number): TextBlock =>
+    new TextBlock(`[Summarized: ${count} messages, ~5,000 tokens]\n\nsummary`)
+  const markedSummary = (count: number): Message =>
+    new Message({ role: 'user', content: [marked(count)], trackingId: anyTrackingId })
   const opener = new Message({
     role: 'user',
     content: [new TextBlock('[Earlier conversation omitted]')],
@@ -403,6 +408,7 @@ describe('routing through Model.summarize', () => {
     }
     vi.spyOn(model, 'summarize').mockImplementation(record)
     vi.spyOn(Model.prototype, 'summarize').mockImplementation(record)
+    vi.spyOn(model, 'countTokens').mockResolvedValue(5000)
     return received
   }
 
@@ -429,7 +435,7 @@ describe('routing through Model.summarize', () => {
       toolSpecs: [toolSpec],
       summarizerSystemPrompt: 'Keep ids',
     })
-    expect(messages).toEqual([summary, ...original.slice(5)])
+    expect(messages).toEqual([markedSummary(5), ...original.slice(5)])
   })
 
   it('records the compaction usage on the invocation context', async () => {
@@ -457,6 +463,41 @@ describe('routing through Model.summarize', () => {
     })
   })
 
+  it('marks a text summary with the summarized messages and their token count', async () => {
+    const model = new MockMessageModel()
+    const content = [new TextBlock('first'), new TextBlock('second')]
+    mockSummarize(model, { summary: new Message({ role: 'user', content }) })
+    vi.mocked(model.countTokens).mockResolvedValue(1234)
+    const strategy = Offload.summarize('*', { model }).when({ utilization: 0.7, preserveRecent: 2 })
+    const messages = makeHistory()
+    const original = [...messages]
+
+    expect(await strategy.apply(makeRoutingContext(messages, 0.9, model))).toBe(true)
+    expect(model.countTokens).toHaveBeenCalledWith(original.slice(0, 5))
+    expect(messages).toEqual([
+      new Message({
+        role: 'user',
+        content: [new TextBlock('[Summarized: 5 messages, ~1,234 tokens]\n\nfirst\nsecond')],
+        trackingId: anyTrackingId,
+      }),
+      ...original.slice(5),
+    ])
+  })
+
+  it('places a summary with non-text content unchanged', async () => {
+    const model = new MockMessageModel()
+    const image = new ImageBlock({ format: 'png', source: { bytes: new Uint8Array([1]) } })
+    const placed = new Message({ role: 'user', content: [new TextBlock('summary'), image] })
+    mockSummarize(model, { summary: placed })
+    const strategy = Offload.summarize('*', { model }).when({ utilization: 0.7, preserveRecent: 2 })
+    const messages = makeHistory()
+    const original = [...messages]
+
+    expect(await strategy.apply(makeRoutingContext(messages, 0.9, model))).toBe(true)
+    expect(model.countTokens).not.toHaveBeenCalled()
+    expect(messages).toEqual([placed, ...original.slice(5)])
+  })
+
   it('moves a cut on a tool pair forward', async () => {
     const model = new MockMessageModel()
     const received = mockSummarize(model)
@@ -478,7 +519,7 @@ describe('routing through Model.summarize', () => {
 
     expect(await strategy.apply(makeRoutingContext(messages, 0.9, model))).toBe(true)
     expect(received).toEqual([original.slice(0, 5)])
-    expect(messages).toEqual([summary, ...original.slice(5)])
+    expect(messages).toEqual([markedSummary(5), ...original.slice(5)])
   })
 
   it('merges same-role messages at the join', async () => {
@@ -493,7 +534,7 @@ describe('routing through Model.summarize', () => {
     expect(messages).toEqual([
       new Message({
         role: 'user',
-        content: [new TextBlock('summary'), new TextBlock('latest')],
+        content: [marked(6), new TextBlock('latest')],
         trackingId: anyTrackingId,
       }),
     ])
@@ -526,7 +567,7 @@ describe('routing through Model.summarize', () => {
     expect(received).toEqual([[opener, ...original.slice(0, 4)]])
     expect(model.summarize).not.toHaveBeenCalled()
     expect(vi.mocked(Model.prototype.summarize).mock.contexts).toEqual([model])
-    expect(messages).toEqual([new Message({ ...summary, trackingId: anyTrackingId }), ...original.slice(4)])
+    expect(messages).toEqual([markedSummary(4), ...original.slice(4)])
   })
 
   it('keeps the summary out of a pinned assistant message so the next pass summarizes it', async () => {
@@ -543,13 +584,13 @@ describe('routing through Model.summarize', () => {
     expect(await strategy.apply(makeRoutingContext(messages, 0.9, model))).toBe(true)
 
     expect(received[1]!.map((message) => message.content)).toEqual([
-      [new TextBlock('summary'), new TextBlock('u4')],
+      [marked(2), new TextBlock('u4')],
       [new TextBlock('a5')],
     ])
     expect(messages.map((message) => message.content)).toEqual([
       [new TextBlock('task')],
       [new TextBlock('ack')],
-      [new TextBlock('summary'), new TextBlock('u6')],
+      [marked(2), new TextBlock('u6')],
     ])
   })
 
@@ -579,7 +620,7 @@ describe('routing through Model.summarize', () => {
       task,
       ack,
       note,
-      new Message({ role: 'assistant', content: [new TextBlock('summary')], trackingId: anyTrackingId }),
+      new Message({ role: 'assistant', content: [marked(5)], trackingId: anyTrackingId }),
       latest,
     ])
   })
@@ -615,7 +656,7 @@ describe('routing through Model.summarize', () => {
 
     expect(await strategy.apply(makeRoutingContext(messages, 0.9, model))).toBe(true)
     expect(received).toEqual([[original[0]]])
-    expect(messages).toEqual([summary, ...original.slice(1)])
+    expect(messages).toEqual([markedSummary(1), ...original.slice(1)])
   })
 
   it('keeps a targeted run whose removal would join a pinned message', async () => {
@@ -675,7 +716,7 @@ describe('routing through Model.summarize', () => {
     expect(vi.mocked(Model.prototype.summarize).mock.contexts).toEqual([model])
     expect(messages).toEqual([
       task,
-      new Message({ role: 'assistant', content: [new TextBlock('summary')], trackingId: anyTrackingId }),
+      new Message({ role: 'assistant', content: [marked(3)], trackingId: anyTrackingId }),
       original[4],
     ])
   })
@@ -707,7 +748,7 @@ describe('routing through Model.summarize', () => {
       pinned,
       new Message({
         role: 'assistant',
-        content: [new TextBlock('c'), new TextBlock('summary')],
+        content: [new TextBlock('c'), marked(4)],
         trackingId: original[5]!.trackingId,
       }),
       original[6],
@@ -738,7 +779,7 @@ describe('routing through Model.summarize', () => {
 
     expect(acted).toEqual([true, false, false])
     expect(received).toHaveLength(1)
-    expect(messages).toEqual([summary, ...original.slice(5)])
+    expect(messages).toEqual([markedSummary(5), ...original.slice(5)])
   })
 
   it('keeps the message before a pinned last message so the summary does not end the history', async () => {
@@ -755,7 +796,7 @@ describe('routing through Model.summarize', () => {
 
     expect(await strategy.apply(makeRoutingContext(messages, 0.9, model))).toBe(true)
     expect(received).toEqual([original.slice(0, 5)])
-    expect(messages).toEqual([summary, ...original.slice(5)])
+    expect(messages).toEqual([markedSummary(5), ...original.slice(5)])
   })
 
   it('sends a target-filtered summary through the base summarize with the selected tool pairs', async () => {
@@ -782,7 +823,7 @@ describe('routing through Model.summarize', () => {
       original[0],
       new Message({
         role: 'assistant',
-        content: [new TextBlock('a'), new TextBlock('summary')],
+        content: [new TextBlock('a'), marked(4)],
         trackingId: original[3]!.trackingId,
       }),
       original[4],
@@ -794,9 +835,12 @@ describe('routing through Model.summarize', () => {
   it('sends a threshold summary of the oversized messages through the base summarize', async () => {
     const model = new MockMessageModel()
     const received = mockSummarize(model)
+    // The threshold selects by real per-message counts.
+    vi.mocked(model.countTokens).mockRestore()
     const strategy = Offload.summarize('*', { model }).when({ utilization: 0.7, threshold: 10 })
     const messages = makeHistory()
     const original = [...messages]
+    const tokens = await model.countTokens([original[2]!, original[4]!])
 
     expect(await strategy.apply(makeRoutingContext(messages, 0.9, model))).toBe(true)
     expect(received).toEqual([
@@ -813,7 +857,12 @@ describe('routing through Model.summarize', () => {
       original[0],
       new Message({
         role: 'assistant',
-        content: [new TextBlock('a'), new TextBlock('summary'), new TextBlock('b'), new TextBlock('c')],
+        content: [
+          new TextBlock('a'),
+          new TextBlock(`[Summarized: 2 messages, ~${tokens.toLocaleString('en-US')} tokens]\n\nsummary`),
+          new TextBlock('b'),
+          new TextBlock('c'),
+        ],
         trackingId: original[1]!.trackingId,
       }),
       original[6],
