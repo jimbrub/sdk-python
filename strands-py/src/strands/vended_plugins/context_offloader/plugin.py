@@ -334,6 +334,8 @@ class ContextOffloader(Plugin):
         if not self._include_retrieval_tool:
             # Remove the auto-discovered retrieval tool
             self._tools = [t for t in self._tools if t.tool_name != "retrieve_offloaded_content"]
+        # Between DEFAULT and SDK_LAST: hooks passed via ``hooks=`` (audit, DLP) see the full result first.
+        agent.add_hook(self._handle_tool_result, AfterToolCallEvent, order=70)
 
     @hook
     async def _on_before_model_call(self, event: BeforeModelCallEvent) -> None:
@@ -468,9 +470,11 @@ class ContextOffloader(Plugin):
 
         return content_bytes.decode("utf-8", errors="replace")
 
-    @hook
     async def _handle_tool_result(self, event: AfterToolCallEvent) -> None:
-        """Intercept oversized tool results, offload per-block, and replace with preview."""
+        """Intercept oversized tool results, offload per-block, and replace with preview.
+
+        Registered in ``init_agent`` with an order after ``HookOrder.DEFAULT``.
+        """
         if event.cancel_message is not None:
             return
 
