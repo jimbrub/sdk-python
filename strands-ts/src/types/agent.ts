@@ -167,8 +167,9 @@ export interface InvokeOptions {
    * limit on that dimension.
    *
    * Priority when several are reached at once (highest first): `turns`,
-   * `totalTokens`, `outputTokens`, with `stopReason` `'limitTurns'`,
-   * `'limitTotalTokens'`, or `'limitOutputTokens'`.
+   * `totalTokens`, `outputTokens`, `structuredOutputAttempts`, with `stopReason`
+   * `'limitTurns'`, `'limitTotalTokens'`, `'limitOutputTokens'`, or
+   * `'limitStructuredOutputAttempts'`.
    */
   limits?: InvokeLimits
 }
@@ -178,8 +179,11 @@ export interface InvokeOptions {
  * is optional; omit a field for no limit on that dimension. Token limits count
  * every model call in the request, unlike a provider's per-call `maxTokens`, and
  * are checked before each turn, so the last turn can go over a limit, more so
- * when nested calls run in parallel. See {@link InvokeOptions.limits} for what
- * they cover.
+ * when nested calls run in parallel. A model response counts as one failed
+ * structured output attempt when it calls the structured output tool with invalid
+ * input, or doesn't return valid structured output while the tool is forced,
+ * including when a content filter or guardrail stops it. See
+ * {@link InvokeOptions.limits} for what they cover.
  */
 export interface InvokeLimits {
   /** Maximum turns (one model call plus the tool calls it requests) across the request. */
@@ -190,6 +194,9 @@ export interface InvokeLimits {
 
   /** Maximum input + output tokens across every model call in the request; input grows each turn, so this compounds. */
   totalTokens?: number
+
+  /** Maximum failed structured output attempts across the request; when omitted, retries are unbounded and a failed forced response throws `StructuredOutputError`. */
+  structuredOutputAttempts?: number
 }
 
 /**
@@ -197,7 +204,7 @@ export interface InvokeLimits {
  *
  * @internal
  */
-export const LIMITS_KEYS = ['turns', 'outputTokens', 'totalTokens'] as const
+export const LIMITS_KEYS = ['turns', 'outputTokens', 'totalTokens', 'structuredOutputAttempts'] as const
 
 /**
  * Interface for agents that support request-response invocation.

@@ -107,7 +107,7 @@ import { AgentMetrics, Meter } from '../telemetry/meter.js'
 import { context as otelContext, propagation } from '@opentelemetry/api'
 import type { AttributeValue } from '@opentelemetry/api'
 import { logger } from '../logging/logger.js'
-import { CancelledError, CheckpointError } from '../errors.js'
+import { CancelledError, CheckpointError, StructuredOutputError } from '../errors.js'
 import { DefaultModelRetryStrategy } from '../retry/default-model-retry-strategy.js'
 import type { RetryStrategy } from '../retry/retry-strategy.js'
 import { warnOnDuplicateRetryStrategyTypes } from '../retry/retry-strategy.js'
@@ -396,6 +396,9 @@ type ToolsExecutionResult = { message: Message; afterToolsEvent: AfterToolsEvent
 
 /** Model reached by the middleware terminal; empty when the chain short-circuits or fails before reaching it. */
 type InvokedModelRef = { model?: Model }
+
+/** How a turn that ended without a tool call continues: retry with the structured output tool forced, or end. */
+type TextTurnOutcome = { retry: true } | { retry: false; stopReason: StopReason; structuredOutput?: JSONValue }
 
 /** Resolves `auxModel` like `model`: a string is a Bedrock model ID; a ModelRouter is rejected. */
 function resolveAuxModel(auxModel: Model | string | undefined): Model | undefined {
@@ -1768,18 +1771,19 @@ export class Agent implements LocalAgent, InvokableAgent {
 
             if (modelResult.stopReason !== 'toolUse') {
               // Validate before closing the span so the cycle span records a failure.
-              const structuredOutput = this._structuredOutputFromText(
-                modelResult.message,
+              const textTurn = this._resolveTextTurn(
+                modelResult,
                 structuredOutputTool,
-                structuredOutputChoice
+                structuredOutputChoice,
+                invocationContext
               )
 
               closeCycle()
 
-              // Schema set, model ignored the tool — drop the response and force the tool next cycle.
+              // Schema set, no structured output yet — drop the response and force the tool next cycle.
               // Appending the plain-text turn here would leave the conversation ending on an
               // assistant message, which providers like Bedrock reject as assistant prefill.
-              if (structuredOutputTool && !structuredOutputChoice) {
+              if (textTurn.retry) {
                 structuredOutputChoice = { tool: { name: STRUCTURED_OUTPUT_TOOL_NAME } }
                 logger.debug(
                   'structured output schema set but model responded with plain text; forcing tool use on next cycle'
@@ -1787,19 +1791,21 @@ export class Agent implements LocalAgent, InvokableAgent {
                 continue
               }
 
-              // Normal end of turn, carrying any structured output the retry returned as text.
+              // End of turn, carrying any structured output the retry returned as text.
               yield this._appendMessage(modelResult.message, invocationState, invocationContext)
               result = new AgentResult({
                 invocationContext,
-                stopReason: modelResult.stopReason,
+                stopReason: textTurn.stopReason,
                 lastMessage: modelResult.message,
                 traces: this._tracer.localTraces,
-                ...(structuredOutput !== undefined && { structuredOutput }),
+                ...(textTurn.structuredOutput !== undefined && { structuredOutput: textTurn.structuredOutput }),
                 metrics: this._meter.metrics,
                 invocationState,
               })
               return result
             }
+
+            this._recordForcedToolUseFailure(modelResult.message, structuredOutputChoice, invocationContext)
 
             // Cancel before tool execution: create error results for all pending tools
             if (this.isAborted) {
@@ -1913,6 +1919,13 @@ export class Agent implements LocalAgent, InvokableAgent {
           }
 
           closeCycle()
+
+          this._recordStructuredOutputToolFailure(
+            assistantMessage,
+            structuredOutput,
+            structuredOutputTool,
+            invocationContext
+          )
 
           // Hook requested halt with content: exit without calling the model again.
           const { afterToolsEvent } = toolsResult
@@ -2063,22 +2076,97 @@ export class Agent implements LocalAgent, InvokableAgent {
   }
 
   /**
+   * Decides how a turn that ended without a tool call continues. With a schema set and no structured output yet,
+   * the turn is retried with the structured output tool forced, unless a limit is reached: the turn then ends with
+   * that limit's stop reason, keeping the model's reply as the result's last message.
+   *
+   * @param modelResult - The model call that ended the turn
+   * @param structuredOutputTool - The structured output tool, if a schema is set
+   * @param structuredOutputChoice - The tool choice the turn was forced with, if it was the retry
+   * @param invocationContext - The state of the request the turn ran in
+   * @returns Whether to retry, or the stop reason and any structured output to end the turn with
+   * @throws StructuredOutputError if the retry produced no valid structured output and no
+   *   `structuredOutputAttempts` limit applies
+   */
+  private _resolveTextTurn(
+    modelResult: StreamAggregatedResult,
+    structuredOutputTool: StructuredOutputTool | undefined,
+    structuredOutputChoice: ToolChoice | undefined,
+    invocationContext: InvocationContextImpl
+  ): TextTurnOutcome {
+    if (!structuredOutputTool) return { retry: false, stopReason: modelResult.stopReason }
+    const structuredOutput =
+      structuredOutputChoice &&
+      this._structuredOutputFromForcedText(modelResult.message, structuredOutputTool, invocationContext)
+    if (structuredOutput !== undefined) return { retry: false, stopReason: modelResult.stopReason, structuredOutput }
+    const limitStopReason = reachedLimit(invocationContext)
+    return limitStopReason ? { retry: false, stopReason: limitStopReason } : { retry: true }
+  }
+
+  /**
    * Validates the text that ended the structured output retry, which may be JSON when the provider could not force
    * the tool.
    *
-   * @param message - The assistant message that ended the turn without a tool call
-   * @param structuredOutputTool - The structured output tool, if a schema is set
-   * @param structuredOutputChoice - The tool choice the turn was forced with, if it was the retry
-   * @returns The validated structured output, or undefined if the turn was not the structured output retry
-   * @throws StructuredOutputError if the retry produced no valid structured output
+   * @param message - The assistant message that ended the retry without a tool call
+   * @param structuredOutputTool - The structured output tool
+   * @param invocationContext - The state of the request the retry ran in
+   * @returns The validated structured output, or undefined if the retry failed under a `structuredOutputAttempts`
+   *   limit, which then counts the failure
+   * @throws StructuredOutputError if the retry produced no valid structured output and no
+   *   `structuredOutputAttempts` limit applies
    */
-  private _structuredOutputFromText(
+  private _structuredOutputFromForcedText(
     message: Message,
-    structuredOutputTool: StructuredOutputTool | undefined,
-    structuredOutputChoice: ToolChoice | undefined
+    structuredOutputTool: StructuredOutputTool,
+    invocationContext: InvocationContextImpl
   ): JSONValue | undefined {
-    if (!structuredOutputTool || !structuredOutputChoice) return undefined
-    return structuredOutputTool.resultFromText(message)
+    try {
+      return structuredOutputTool.resultFromText(message)
+    } catch (error) {
+      if (!(error instanceof StructuredOutputError) || !invocationContext.hasLimit('structuredOutputAttempts')) {
+        throw error
+      }
+      invocationContext.recordStructuredOutputFailure()
+      logger.debug('structured output retry failed | counted toward the structured output attempt limit')
+      return undefined
+    }
+  }
+
+  /**
+   * Counts a failed structured output attempt for a forced model response that calls only other tools. Counted when
+   * the response arrives, so an interrupt or checkpoint before its tools run can't lose the count.
+   *
+   * @param message - The assistant message the model returned
+   * @param structuredOutputChoice - The tool choice the turn was forced with, if any
+   * @param invocationContext - The state of the request the turn ran in
+   */
+  private _recordForcedToolUseFailure(
+    message: Message,
+    structuredOutputChoice: ToolChoice | undefined,
+    invocationContext: InvocationContextImpl
+  ): void {
+    if (structuredOutputChoice && structuredOutputToolUseIds(message).size === 0) {
+      invocationContext.recordStructuredOutputFailure()
+    }
+  }
+
+  /**
+   * Counts a failed structured output attempt for a tool turn whose structured output tool calls all failed.
+   *
+   * @param toolUseMessage - The assistant message whose tool calls ran
+   * @param structuredOutput - The structured output extracted from every result of the turn, including results
+   *   completed before an interrupt, if any
+   * @param structuredOutputTool - The structured output tool, if a schema is set
+   * @param invocationContext - The state of the request the turn ran in
+   */
+  private _recordStructuredOutputToolFailure(
+    toolUseMessage: Message,
+    structuredOutput: unknown,
+    structuredOutputTool: StructuredOutputTool | undefined,
+    invocationContext: InvocationContextImpl
+  ): void {
+    if (!structuredOutputTool || structuredOutput !== undefined) return
+    if (structuredOutputToolUseIds(toolUseMessage).size > 0) invocationContext.recordStructuredOutputFailure()
   }
 
   /**
@@ -2089,14 +2177,10 @@ export class Agent implements LocalAgent, InvokableAgent {
    * @returns The parsed structured output, or undefined if not found
    */
   private _extractStructuredOutput(toolUseMessage: Message, toolResultMessage: Message): unknown | undefined {
-    const toolUse = toolUseMessage.content.find(
-      (block): block is ToolUseBlock => block.type === 'toolUseBlock' && block.name === STRUCTURED_OUTPUT_TOOL_NAME
-    )
-    if (!toolUse) return undefined
-
+    const outputToolUseIds = structuredOutputToolUseIds(toolUseMessage)
     const toolResult = toolResultMessage.content.find(
       (block): block is ToolResultBlock =>
-        block.type === 'toolResultBlock' && block.toolUseId === toolUse.toolUseId && block.status === 'success'
+        block.type === 'toolResultBlock' && outputToolUseIds.has(block.toolUseId) && block.status === 'success'
     )
     if (!toolResult) return undefined
 
@@ -2912,6 +2996,22 @@ function isBlankTextBlock(block: ContentBlock): boolean {
 }
 
 const INVALID_TOOL_NAME_PLACEHOLDER = 'INVALID_TOOL_NAME'
+
+/**
+ * Returns the IDs of a message's structured output tool calls.
+ *
+ * @param message - The assistant message to scan
+ * @returns The tool use IDs of every structured output tool call in the message
+ */
+function structuredOutputToolUseIds(message: Message): Set<string> {
+  return new Set(
+    message.content
+      .filter(
+        (block): block is ToolUseBlock => block.type === 'toolUseBlock' && block.name === STRUCTURED_OUTPUT_TOOL_NAME
+      )
+      .map((block) => block.toolUseId)
+  )
+}
 
 /**
  * Replaces invalid tool-use names on assistant messages with `INVALID_TOOL_NAME`
