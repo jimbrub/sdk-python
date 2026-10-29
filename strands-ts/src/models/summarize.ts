@@ -27,8 +27,8 @@ export interface SummarizeOptions {
   /** The live conversation's tool specifications, for an override. */
   toolSpecs?: ToolSpec[]
 
-  /** Summarization system prompt that replaces the default one. */
-  instructions?: string
+  /** System prompt for the summarizer, replacing the default one. */
+  summarizerSystemPrompt?: string
 }
 
 /**
@@ -76,7 +76,7 @@ export async function summarizeWithStream(
 ): Promise<SummarizeResult> {
   const content = [new TextBlock('<content>'), ...flattenMessagesToContent(messages), new TextBlock('</content>')]
   const request = [new Message({ role: 'user', content })]
-  const systemPrompt = options.instructions || DEFAULT_SUMMARIZE_INSTRUCTIONS
+  const systemPrompt = options.summarizerSystemPrompt || DEFAULT_SUMMARIZE_INSTRUCTIONS
   const { reply, ...usage } = await readSummary(model.streamAggregated(request, { systemPrompt }))
   const summary = (reply?.content ?? [])
     .flatMap(blockText)

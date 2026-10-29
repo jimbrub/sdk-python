@@ -719,7 +719,7 @@ def _recording_stream(received, *texts, stop_reason="end_turn"):
 
 class TestSummarize:
     @pytest.mark.asyncio
-    async def test_streams_a_flattened_transcript_under_the_instructions_and_returns_summary_and_usage(
+    async def test_streams_a_flattened_transcript_under_the_summarizer_system_prompt_and_returns_summary_and_usage(
         self, model, tool_specs
     ):
         messages = [
@@ -743,7 +743,7 @@ class TestSummarize:
                 tool_specs=tool_specs,
                 system_prompt="live prompt",
                 system_prompt_content=[{"text": "live prompt"}],
-                instructions="Keep ids",
+                summarizer_system_prompt="Keep ids",
             )
 
         exp_request = [
@@ -769,7 +769,7 @@ class TestSummarize:
         assert messages == original
 
     @pytest.mark.asyncio
-    async def test_uses_the_default_summarization_system_prompt_without_instructions(self, model):
+    async def test_uses_the_default_summarizer_system_prompt_when_none_is_given(self, model):
         received = []
 
         with unittest.mock.patch.object(model, "stream", _recording_stream(received, "summary")):

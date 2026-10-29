@@ -342,7 +342,7 @@ class Model(abc.ABC):
         tool_specs: list[ToolSpec] | None = None,
         system_prompt: str | None = None,
         system_prompt_content: list[SystemContentBlock] | None = None,
-        instructions: str | None = None,
+        summarizer_system_prompt: str | None = None,
         **kwargs: Any,
     ) -> SummarizeResult:
         """Summarize ``messages`` into one message that replaces them.
@@ -362,14 +362,14 @@ class Model(abc.ABC):
             tool_specs: The live conversation's tool specifications, for an override.
             system_prompt: The live conversation's plain string system prompt, for an override.
             system_prompt_content: The live conversation's structured system prompt, for an override.
-            instructions: Summarization system prompt that replaces the default one.
+            summarizer_system_prompt: System prompt for the summarizer, replacing the default one.
             **kwargs: Additional keyword arguments for future extensibility.
 
         Returns:
             The summary message and the call's token usage. The summary never contains a tool use; its content is
             empty when the model wrote no summary.
         """
-        return await _summarize_with_stream(self, messages, instructions=instructions)
+        return await _summarize_with_stream(self, messages, summarizer_system_prompt=summarizer_system_prompt)
 
     def estimate_utilization(self, input_tokens: int) -> float:
         """Estimate the fraction of the model's context window consumed by the given input token count.

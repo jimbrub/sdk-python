@@ -318,7 +318,7 @@ export class SummarizeStrategy extends BaseOffloadStrategy {
     try {
       // A lone block is not the conversation's start, so it gets the base summary.
       result = await Model.prototype.summarize.call(model, [new Message({ role: 'user', content })], {
-        ...(this._config.systemPrompt !== undefined && { instructions: this._config.systemPrompt }),
+        ...(this._config.systemPrompt !== undefined && { summarizerSystemPrompt: this._config.systemPrompt }),
       })
     } catch (error) {
       logger.warn(
@@ -337,7 +337,7 @@ export class SummarizeStrategy extends BaseOffloadStrategy {
       // treats it as a different conversation.
       ...(agent.systemPrompt !== undefined && { systemPrompt: agent.systemPrompt }),
       toolSpecs: agent.toolRegistry.list().map((tool) => tool.toolSpec),
-      ...(this._config.systemPrompt !== undefined && { instructions: this._config.systemPrompt }),
+      ...(this._config.systemPrompt !== undefined && { summarizerSystemPrompt: this._config.systemPrompt }),
     }
   }
 

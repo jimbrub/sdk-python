@@ -42,12 +42,14 @@ class SummarizeResult:
 
 
 async def _summarize_with_stream(
-    model: "Model", messages: Messages, *, instructions: str | None = None
+    model: "Model", messages: Messages, *, summarizer_system_prompt: str | None = None
 ) -> SummarizeResult:
     """Summarize ``messages`` with a tool-less :meth:`Model.stream` call on their delimited, flattened transcript."""
     content = [ContentBlock(text="<content>"), *_flatten_messages_to_content(messages), ContentBlock(text="</content>")]
     request = [Message(role="user", content=content)]
-    events = model.stream(request, tool_specs=None, system_prompt=instructions or _DEFAULT_SUMMARIZE_INSTRUCTIONS)
+    events = model.stream(
+        request, tool_specs=None, system_prompt=summarizer_system_prompt or _DEFAULT_SUMMARIZE_INSTRUCTIONS
+    )
     summary, usage = await _read_summary(events)
     summary_content = [ContentBlock(text=summary)] if summary else []
     return SummarizeResult(summary=Message(role="user", content=summary_content), usage=usage)

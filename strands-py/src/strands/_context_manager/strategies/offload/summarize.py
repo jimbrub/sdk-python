@@ -261,7 +261,7 @@ class SummarizeStrategy(BaseOffloadStrategy):
             tool_specs=agent.tool_registry.get_all_tool_specs(),
             system_prompt=agent.system_prompt,
             system_prompt_content=agent.system_prompt_content,
-            instructions=self._config.get("system_prompt"),
+            summarizer_system_prompt=self._config.get("system_prompt"),
         )
         if result.usage:
             _record_usage(context.invocation_context, result.usage)
@@ -342,7 +342,7 @@ class SummarizeStrategy(BaseOffloadStrategy):
             result = await Model.summarize(
                 model,
                 [Message(role="user", content=content)],
-                instructions=self._config.get("system_prompt"),
+                summarizer_system_prompt=self._config.get("system_prompt"),
             )
         except Exception as error:
             logger.warning(

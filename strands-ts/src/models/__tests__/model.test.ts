@@ -1335,7 +1335,7 @@ describe('summarize', () => {
   const usage = { inputTokens: 4, outputTokens: 5, totalTokens: 9 }
   const shape = (messages: Message[]) => messages.map(({ role, content, metadata }) => ({ role, content, metadata }))
 
-  it('streams a flattened transcript under the instructions and returns the summary and usage', async () => {
+  it('streams a flattened transcript under the summarizer system prompt and returns the summary and usage', async () => {
     const model = new MockMessageModel().addTurn({ type: 'textBlock', text: ' the summary ' }, { usage })
     const streamSpy = vi.spyOn(model, 'stream')
     const messages = [
@@ -1358,7 +1358,7 @@ describe('summarize', () => {
     const result = await model.summarize(messages, {
       systemPrompt: 'live prompt',
       toolSpecs: [toolSpec],
-      instructions: 'Keep ids',
+      summarizerSystemPrompt: 'Keep ids',
     })
 
     const [request, options] = streamSpy.mock.calls[0]!
@@ -1386,7 +1386,7 @@ describe('summarize', () => {
     expect(shape(messages)).toEqual(original)
   })
 
-  it('uses the default summarization system prompt without instructions', async () => {
+  it('uses the default summarizer system prompt when none is given', async () => {
     const model = new MockMessageModel().addTurn({ type: 'textBlock', text: 'summary' })
     const streamSpy = vi.spyOn(model, 'stream')
 

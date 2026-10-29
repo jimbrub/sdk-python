@@ -541,7 +541,7 @@ class TestSummarizationWithToolCalls:
             tool_specs=[{"name": "read"}],
             system_prompt="live system prompt",
             system_prompt_content=[{"text": "live system prompt"}],
-            instructions=None,
+            summarizer_system_prompt=None,
         )
 
 
@@ -609,7 +609,7 @@ class TestSummarizeStrategyRouting:
             tool_specs=[{"name": "read"}],
             system_prompt="live system prompt",
             system_prompt_content=[{"text": "live system prompt"}],
-            instructions="Keep ids",
+            summarizer_system_prompt="Keep ids",
         )
         assert messages == [TRACKED_SUMMARY, *original[5:]]
 
@@ -714,7 +714,7 @@ class TestSummarizeStrategyRouting:
             tool_specs=[{"name": "read"}],
             system_prompt="live system prompt",
             system_prompt_content=[{"text": "live system prompt"}],
-            instructions=None,
+            summarizer_system_prompt=None,
         )
 
     @pytest.mark.asyncio
