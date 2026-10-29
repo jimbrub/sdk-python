@@ -17,7 +17,8 @@ import {
 } from '@strands-agents/sdk/vended-tools/handoff-to-user'
 import { sleep, makeSleep } from '@strands-agents/sdk/vended-tools/sleep'
 import { write } from '@strands-agents/sdk/vended-tools/write'
-import { stop } from '@strands-agents/sdk/experimental/vended-tools/stop'
+import { read } from '@strands-agents/sdk/vended-tools/read'
+import { stop } from '@strands-agents/sdk/vended-tools/stop'
 import { pythonRepl, makePythonRepl } from '@strands-agents/sdk/vended-tools/python-repl'
 import { DockerSandbox } from '@strands-agents/sdk/sandbox/docker'
 import { webFetch, makeWebFetch } from '@strands-agents/sdk/vended-tools/web-fetch'
@@ -34,6 +35,7 @@ import {
 import { Choice, Option, Preset } from '@strands-agents/sdk/multiagent'
 import { subagent, makeSubagent } from '@strands-agents/sdk/vended-tools/subagent'
 import { swarm, makeSwarm } from '@strands-agents/sdk/vended-tools/swarm'
+import { graph, makeGraph } from '@strands-agents/sdk/vended-tools/graph'
 import { Fixed, Inherit } from '@strands-agents/sdk/multiagent'
 
 // Agent with vended tools example
@@ -106,6 +108,14 @@ async function writeExample() {
   const agent = new Agent({ tools: [write] })
   await agent.invoke("Create /tmp/hello.txt containing 'Hello, Strands!'")
   // --8<-- [end:write_example]
+}
+
+// Read tool example
+async function readExample() {
+  // --8<-- [start:read_example]
+  const agent = new Agent({ tools: [read] })
+  await agent.invoke('Read /etc/hosts and summarize what it maps.')
+  // --8<-- [end:read_example]
 }
 
 // HTTP request example
@@ -424,4 +434,40 @@ async function swarmCustomExample() {
   const agent = new Agent({ tools: [swarm, httpRequest, webFetch] })
   await agent.invoke('Write a blog post about AI agents')
   // --8<-- [end:swarm_custom_example]
+}
+
+// Graph tool example
+async function graphExample() {
+  // --8<-- [start:graph_example]
+  const agent = new Agent({ tools: [graph, httpRequest] })
+  await agent.invoke(
+    'Research three competing vector databases in parallel, then write a comparison table.'
+  )
+  // --8<-- [end:graph_example]
+}
+
+// Graph tool with custom configuration
+async function graphCustomExample() {
+  // --8<-- [start:graph_custom_example]
+  const team = makeGraph({
+    presets: {
+      researcher: new Preset({
+        instructions: 'Gather facts from the web and cite every source.',
+        tools: ['http_request'],
+        description: 'Finds and summarizes sources.',
+      }),
+      writer: new Preset({
+        instructions: 'Turn upstream findings into clear prose.',
+        tools: ['file_editor'],
+        description: 'Drafts the final document.',
+      }),
+    },
+    tools: new Choice(['http_request', 'file_editor'], true),
+    maxNodes: 6,
+    maxEdges: 10,
+    timeout: 600_000,
+    nodeTimeout: 120_000,
+  })
+  const agent = new Agent({ tools: [team, httpRequest, fileEditor] })
+  // --8<-- [end:graph_custom_example]
 }

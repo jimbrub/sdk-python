@@ -17,10 +17,11 @@ sourceLinks:
   - path: strands-ts/src/vended-tools/sleep/sleep.ts
   - path: strands-ts/src/vended-tools/web-fetch/web-fetch.ts
   - path: strands-ts/src/vended-tools/mcp-router/mcp-router.ts
-  - path: strands-ts/src/experimental/vended-tools/stop/stop.ts
+  - path: strands-ts/src/vended-tools/stop/stop.ts
   - path: strands-ts/src/vended-tools/a2a-client/a2a-client.ts
   - path: strands-ts/src/vended-tools/subagent/subagent.ts
   - path: strands-ts/src/vended-tools/swarm/swarm.ts
+  - path: strands-ts/src/vended-tools/graph/graph.ts
   - path: strands-ts/src/vended-tools/python-repl/python-repl.ts
   - path: strands-py/src/strands/vended_tools/handoff_to_user/handoff_to_user.py
   - path: strands-py/src/strands/vended_tools/http_request/http_request.py
@@ -36,6 +37,7 @@ sourceLinks:
   - path: strands-py/src/strands/vended_tools/graph/graph.py
   - path: strands-py/src/strands/vended_tools/python_repl/python_repl.py
   - path: strands-py/src/strands/vended_tools/read/read.py
+  - path: strands-ts/src/vended-tools/read/read.ts
 ---
 
 Vended tools are pre-built tools included directly in the Strands Harness SDK for common agent tasks like file operations, shell commands, HTTP requests, and persistent notes.
@@ -58,7 +60,7 @@ Each tool is imported from its own subpath under `@strands-agents/sdk/vended-too
 |------|-------------|--------------|
 | [Edit](#edit) | Make in-place changes to a text file | Python, TypeScript (Node.js) |
 | [File Editor](#file-editor) *(deprecated)* | View, create, and edit files | Python, TypeScript (Node.js) |
-| [Read](#read) | Read a file as numbered text or a media block | Python |
+| [Read](#read) | Read a file as numbered text or a media block | Python, TypeScript (Node.js) |
 | [Write](#write) | Create or overwrite a text file with the full provided content | Python, TypeScript (Node.js) |
 | [HTTP Request](#http-request) | Make HTTP requests to external APIs | Python, TypeScript (Node.js 22+, browsers) |
 | [Notebook](#notebook) | Manage persistent text notebooks | Python, TypeScript (Node.js, browsers) |
@@ -72,7 +74,7 @@ Each tool is imported from its own subpath under `@strands-agents/sdk/vended-too
 | [Python REPL](#python-repl) | Execute Python code through the agent's sandbox | Python, TypeScript (Node.js, Unix/Linux/macOS) |
 | [Subagent](#subagent) | Delegate a self-contained task to a child agent | Python, TypeScript (Node.js, browsers) |
 | [Swarm](#swarm) | Spin up a team of agents that collaborate via the swarm pattern | Python, TypeScript (Node.js, browsers) |
-| [Graph](#graph) | Run a team of sub-agents as a directed acyclic graph designed by the model | Python |
+| [Graph](#graph) | Run a team of sub-agents as a directed acyclic graph designed by the model | Python, TypeScript (Node.js, browsers) |
 
 ### Edit
 
@@ -154,9 +156,9 @@ agent("Create a file at /tmp/hello.txt with the contents 'Hello, world!'")
 
 ### Read
 
-Reads a file through the agent's sandbox. Text files return `cat -n` style numbered lines so the model can cite `path:line`, with `offset` and `limit` for paging through large files. Images (png/jpg/jpeg/gif/webp) and binary documents (pdf/doc/docx/xls/xlsx) return as media content blocks when the model accepts media; otherwise `make_read(media=False)` returns a short text placeholder describing the file.
+Reads a file through the agent's sandbox. Text files return `cat -n` style numbered lines so the model can cite `path:line`, with `offset` and `limit` for paging through large files. Images (png/jpg/jpeg/gif/webp) and binary documents (pdf/doc/docx/xls/xlsx) return as media content blocks when the model accepts media; otherwise `make_read(media=False)` / `makeRead({ media: false })` returns a short text placeholder describing the file.
 
-_Supported in: Python._
+_Supported in: Python, TypeScript (Node.js)._
 
 :::caution[Security Warning]
 This tool reads files at arbitrary absolute paths with the full permissions of the process. Only use with trusted input and consider running in a [sandboxed environment](../sandbox/index.mdx) for production.
@@ -176,7 +178,18 @@ agent("Read /etc/hosts and summarize what it maps.")
 ```
 
 </Tab>
+<Tab label="TypeScript">
+
+```typescript
+--8<-- "user-guide/sdk/tools/vended-tools-imports.ts:read_import"
+
+--8<-- "user-guide/sdk/tools/vended-tools.ts:read_example"
+```
+
+</Tab>
 </Tabs>
+
+[Full API reference](https://github.com/strands-agents/harness-sdk/blob/main/strands-ts/src/vended-tools/read/README.md)
 
 ---
 
@@ -567,12 +580,13 @@ _Supported in: Node.js, modern browsers (TypeScript); all platforms (Python)._
 
 This is a cooperative stop, not an abort. Any other tools the model requested in the same turn still run to completion; the loop halts after that batch without calling the model again. The final message defaults to a 4096-character cap; pass `max_message_length` / `maxMessageLength` to `make_stop` / `makeStop` when a longer summary is legitimate.
 
-The two SDKs shim onto different loop-termination primitives, which produces a
-small difference in the final `AgentResult`'s stop reason. TypeScript halts via
-`AfterToolsEvent.endTurn` and returns `stopReason: "endTurn"`. Python halts via
-`agent.cancel(message=..., after_current_tools=True)` and returns
-`stop_reason: "cancelled"`. In both cases the stop text is appended as the last
-assistant message.
+Both SDKs stop the loop through `agent.cancel()` with the deferred flag
+(`agent.cancel({ message, afterCurrentTools: true })` /
+`agent.cancel(message=..., after_current_tools=True)`), so the final `AgentResult`
+is the same in each: `stopReason: "cancelled"` / `stop_reason: "cancelled"`, with
+the stop text as the last assistant message. A sub-agent that ends this way is
+reported as a successful result by <Syntax py="agent.as_tool()" ts="agent.asTool()" />
+and the subagent tool; only an immediate `agent.cancel()` is reported as an error.
 
 **Example:**
 
@@ -602,7 +616,7 @@ result = agent("Summarize the changes in ./CHANGELOG.md")
 </Tab>
 </Tabs>
 
-[Full API reference](https://github.com/strands-agents/harness-sdk/blob/main/strands-ts/src/experimental/vended-tools/stop/README.md)
+[Full API reference](https://github.com/strands-agents/harness-sdk/blob/main/strands-ts/src/vended-tools/stop/README.md)
 
 ---
 
@@ -1017,10 +1031,34 @@ Lets your agent design and run a team of sub-agents as a [Graph](../multi-agent/
 Nodes inherit the caller's model and tools, including MCP tools, except graph tools. Child
 interrupts pause the tool call and resume with the user's response. An interrupted graph
 is saved in the parent agent's interrupt state, so it can resume after the parent is
-restored from a snapshot or session. By default, a call times out after 900 seconds and
-each node after 300 seconds. A running graph cannot be cancelled from the parent agent.
+restored from a snapshot or session. By default, a call times out after 15 minutes and
+each node after 5 minutes.
+
+_Supported in: Python, TypeScript (Node.js, browsers)._
 
 **Example:**
+
+<Tabs>
+<Tab label="TypeScript">
+
+```typescript
+--8<-- "user-guide/sdk/tools/vended-tools-imports.ts:graph_import"
+
+--8<-- "user-guide/sdk/tools/vended-tools.ts:graph_example"
+```
+
+Use `makeGraph` to set limits (`maxNodes`, `maxEdges`, `maxSteps`, and `timeout` and `nodeTimeout` in
+milliseconds), build each node agent yourself with `builder`, or control what the model configures on each
+node with [axis policies](#axis-policies) over `instructions`, `tools`, and `model`.
+
+```typescript
+--8<-- "user-guide/sdk/tools/vended-tools-imports.ts:graph_custom_import"
+
+--8<-- "user-guide/sdk/tools/vended-tools.ts:graph_custom_example"
+```
+
+</Tab>
+<Tab label="Python">
 
 ```python
 from strands import Agent
@@ -1030,12 +1068,10 @@ agent = Agent(tools=[graph, http_request])
 agent("Research three competing vector databases in parallel, then write a comparison table.")
 ```
 
-Use `make_graph` to set limits (`max_nodes`, `max_edges`, `max_node_executions`,
-`execution_timeout`, `node_timeout`), build each node agent yourself with `builder`, or control
-what the model configures on each node with [axis policies](#axis-policies) over `instructions`,
-`tools`, and `model`.
-
-**Custom configuration:**
+Use `make_graph` to set limits (`max_nodes`, `max_edges`, `max_node_executions`, and
+`execution_timeout` and `node_timeout` in seconds), build each node agent yourself with `builder`, or
+control what the model configures on each node with [axis policies](#axis-policies) over `instructions`,
+`tools`, and `model`. A running graph cannot be cancelled from the parent agent.
 
 ```python
 from strands import Agent
@@ -1063,6 +1099,11 @@ team = make_graph(
 )
 agent = Agent(tools=[team, http_request, file_editor])
 ```
+
+</Tab>
+</Tabs>
+
+Full API reference: [TypeScript](https://github.com/strands-agents/harness-sdk/blob/main/strands-ts/src/vended-tools/graph/README.md)
 
 ---
 
