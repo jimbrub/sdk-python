@@ -56,7 +56,7 @@ def _compaction_split_index(messages: Messages, preserved_messages: int | float)
 
 
 def _recency_split(messages: Messages, preserved_messages: int | float) -> int:
-    """Return the cut of a recency-only pass: the compaction cut, moved off a pinned last user message."""
+    """Return the cut of a recency-only pass: the compaction cut, moved off the last message."""
     split = _compaction_split_index(messages, preserved_messages)
     if not 0 < split == len(messages) - 1:
         return split

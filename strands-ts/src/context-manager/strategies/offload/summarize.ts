@@ -49,7 +49,7 @@ export function compactionSplitIndex(messages: Message[], preservedMessages: num
   return split > 1 ? split : 0
 }
 
-/** Returns the cut of a recency-only pass: the compaction cut, moved off a pinned last user message. */
+/** Returns the cut of a recency-only pass: the compaction cut, moved off the last message. */
 function recencySplit(messages: Message[], preservedMessages: number): number {
   const split = compactionSplitIndex(messages, preservedMessages)
   const last = messages.length - 1
