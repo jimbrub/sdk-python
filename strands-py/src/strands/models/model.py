@@ -350,32 +350,26 @@ class Model(abc.ABC):
         ``messages`` is non-empty, starts with a user message, alternates roles, and keeps every ``toolUse`` with its
         ``toolResult``. The summary is a user message.
 
-        The base implementation is a :meth:`stream` call with the same system prompt, tools, and messages plus one
-        trailing instruction. The summary is empty unless the reply ends its turn or hits a stop sequence.
+        The base implementation is a :meth:`stream` call, without tools, on one user message holding a flattened
+        transcript of ``messages``, under its own summarization system prompt; it does not send the caller's tools or
+        system prompt. The summary is empty unless the reply ends its turn or hits a stop sequence.
 
         Providers with server-side compaction override this method. An override is called only with the conversation's
         opening messages, and falls back to ``super().summarize()`` when native compaction is unavailable.
 
         Args:
             messages: The messages to summarize, left unmodified.
-            tool_specs: The live conversation's tool specifications, passed through unchanged.
-            system_prompt: The live conversation's plain string system prompt, passed through unchanged.
-            system_prompt_content: The live conversation's structured system prompt, passed through unchanged.
-            instructions: Summarization instruction that replaces the default one.
+            tool_specs: The live conversation's tool specifications, for an override.
+            system_prompt: The live conversation's plain string system prompt, for an override.
+            system_prompt_content: The live conversation's structured system prompt, for an override.
+            instructions: Summarization system prompt that replaces the default one.
             **kwargs: Additional keyword arguments for future extensibility.
 
         Returns:
             The summary message and the call's token usage. The summary never contains a tool use; its content is
             empty when the model wrote no summary.
         """
-        return await _summarize_with_stream(
-            self,
-            messages,
-            tool_specs=tool_specs,
-            system_prompt=system_prompt,
-            system_prompt_content=system_prompt_content,
-            instructions=instructions,
-        )
+        return await _summarize_with_stream(self, messages, instructions=instructions)
 
     def estimate_utilization(self, input_tokens: int) -> float:
         """Estimate the fraction of the model's context window consumed by the given input token count.

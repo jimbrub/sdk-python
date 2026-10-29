@@ -136,21 +136,27 @@ describe('Offload.summarize', () => {
       expect(vi.mocked(Model.prototype.summarize).mock.contexts).toEqual([auxModel])
     })
 
-    it('sends a block to the base summarize as delimited content with the default block instruction', async () => {
+    it('sends a block to the base summarize as a user turn with the custom system prompt', async () => {
+      const largeText = 'x'.repeat(2500 * 4 + 100)
+      const message = new Message({ role: 'assistant', content: [new TextBlock(largeText)] })
+      const strategy = Offload.summarize('assistantText', { systemPrompt: 'Keep ids' })
+
+      expect(await strategy.apply(makeContext([message], 0.9, { stream: vi.fn() }))).toBe(true)
+      expect(Model.prototype.summarize).toHaveBeenCalledWith(
+        [new Message({ role: 'user', content: [new TextBlock(largeText)], trackingId: anyTrackingId })],
+        { instructions: 'Keep ids' }
+      )
+    })
+
+    it('sends a block to the base summarize without instructions by default', async () => {
       const largeText = 'x'.repeat(2500 * 4 + 100)
       const message = new Message({ role: 'assistant', content: [new TextBlock(largeText)] })
       const strategy = Offload.summarize('assistantText')
 
       expect(await strategy.apply(makeContext([message], 0.9, { stream: vi.fn() }))).toBe(true)
       expect(Model.prototype.summarize).toHaveBeenCalledWith(
-        [
-          new Message({
-            role: 'user',
-            content: [new TextBlock('<content>'), new TextBlock(largeText), new TextBlock('</content>')],
-            trackingId: anyTrackingId,
-          }),
-        ],
-        { instructions: expect.stringContaining('Summarize the content between the <content> delimiters') }
+        [new Message({ role: 'user', content: [new TextBlock(largeText)], trackingId: anyTrackingId })],
+        {}
       )
     })
 

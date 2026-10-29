@@ -1335,13 +1335,22 @@ describe('summarize', () => {
   const usage = { inputTokens: 4, outputTokens: 5, totalTokens: 9 }
   const shape = (messages: Message[]) => messages.map(({ role, content, metadata }) => ({ role, content, metadata }))
 
-  it('streams the messages with the instruction in the trailing user turn and returns the summary and usage', async () => {
+  it('streams a flattened transcript under the instructions and returns the summary and usage', async () => {
     const model = new MockMessageModel().addTurn({ type: 'textBlock', text: ' the summary ' }, { usage })
     const streamSpy = vi.spyOn(model, 'stream')
     const messages = [
       new Message({ role: 'user', content: [new TextBlock('task')], metadata: { custom: { pinned: true } } }),
-      text('assistant', 'answer'),
-      text('user', 'follow up'),
+      new Message({
+        role: 'assistant',
+        content: [
+          new ReasoningBlock({ text: 'plan', signature: 'sig' }),
+          new ToolUseBlock({ name: 'shell', toolUseId: 't1', input: { command: 'ls' } }),
+        ],
+      }),
+      new Message({
+        role: 'user',
+        content: [new ToolResultBlock({ toolUseId: 't1', status: 'success', content: [] })],
+      }),
     ]
     const original = shape(messages)
     const toolSpec = { name: 'read', description: 'Read a file', inputSchema: { type: 'object' as const } }
@@ -1354,15 +1363,22 @@ describe('summarize', () => {
 
     const [request, options] = streamSpy.mock.calls[0]!
     expect(shape(request)).toEqual([
-      { role: 'user', content: [new TextBlock('task')], metadata: undefined },
-      { role: 'assistant', content: [new TextBlock('answer')], metadata: undefined },
       {
         role: 'user',
-        content: [new TextBlock('follow up'), new TextBlock('Keep ids')],
+        content: [
+          new TextBlock('<content>'),
+          new TextBlock('\n---\n[user]'),
+          new TextBlock('task'),
+          new TextBlock('\n---\n[assistant]'),
+          new TextBlock('[tool call: shell] {"command":"ls"}'),
+          new TextBlock('\n---\n[user]'),
+          new TextBlock('[tool result: shell]'),
+          new TextBlock('</content>'),
+        ],
         metadata: undefined,
       },
     ])
-    expect(options).toEqual({ systemPrompt: 'live prompt', toolSpecs: [toolSpec] })
+    expect(options).toEqual({ systemPrompt: 'Keep ids' })
     expect(result).toEqual({
       summary: new Message({ role: 'user', content: [new TextBlock('the summary')], trackingId: anyTrackingId }),
       usage,
@@ -1370,7 +1386,7 @@ describe('summarize', () => {
     expect(shape(messages)).toEqual(original)
   })
 
-  it('appends the default instruction as a user turn after an assistant message', async () => {
+  it('uses the default summarization system prompt without instructions', async () => {
     const model = new MockMessageModel().addTurn({ type: 'textBlock', text: 'summary' })
     const streamSpy = vi.spyOn(model, 'stream')
 
@@ -1378,11 +1394,19 @@ describe('summarize', () => {
 
     const [request, options] = streamSpy.mock.calls[0]!
     expect(request.map(({ role, content }) => ({ role, content }))).toEqual([
-      { role: 'user', content: [new TextBlock('task')] },
-      { role: 'assistant', content: [new TextBlock('answer')] },
-      { role: 'user', content: [new TextBlock(DEFAULT_SUMMARIZE_INSTRUCTIONS)] },
+      {
+        role: 'user',
+        content: [
+          new TextBlock('<content>'),
+          new TextBlock('\n---\n[user]'),
+          new TextBlock('task'),
+          new TextBlock('\n---\n[assistant]'),
+          new TextBlock('answer'),
+          new TextBlock('</content>'),
+        ],
+      },
     ])
-    expect(options).toEqual({})
+    expect(options).toEqual({ systemPrompt: DEFAULT_SUMMARIZE_INSTRUCTIONS })
   })
 
   it('joins text and citation blocks with newlines and skips other blocks', async () => {

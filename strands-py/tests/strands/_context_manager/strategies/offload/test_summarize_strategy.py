@@ -6,9 +6,10 @@ import unittest.mock
 import pytest
 
 from strands._context_manager.strategies.offload import Offload
-from strands._context_manager.strategies.offload.summarize import _DEFAULT_BLOCK_INSTRUCTIONS, _compaction_split_index
+from strands._context_manager.strategies.offload.summarize import _compaction_split_index
 from strands._context_manager.types import ContextState
 from strands.models import SummarizeResult
+from strands.models._summarize import _DEFAULT_SUMMARIZE_INSTRUCTIONS
 from strands.models.model import Model
 from strands.types.content import ContentBlock, Message, Messages
 from strands.types.tools import ToolResult, ToolUse
@@ -107,13 +108,13 @@ class TestSummarizeStrategyPerBlock:
                 role="user",
                 content=[
                     ContentBlock(text="<content>"),
+                    ContentBlock(text="\n---\n[user]"),
                     ContentBlock(text="x" * 10000),
                     ContentBlock(text="</content>"),
-                    ContentBlock(text="Keep ids"),
                 ],
             )
         ]
-        assert received == [(exp_request, None, None)]
+        assert received == [(exp_request, None, "Keep ids")]
         invocation_context._record_usage.assert_called_once_with(
             {"inputTokens": 10, "outputTokens": 5, "totalTokens": 15}
         )
@@ -122,11 +123,11 @@ class TestSummarizeStrategyPerBlock:
         ]
 
     @pytest.mark.asyncio
-    async def test_sends_a_block_with_the_default_block_instruction(self, mock_agent):
+    async def test_sends_a_block_under_the_default_summarization_system_prompt(self, mock_agent):
         received = []
 
         async def stream(messages, tool_specs=None, system_prompt=None, **kwargs):
-            received.append(messages)
+            received.append(system_prompt)
             async for event in _make_stream_events("Summary of content.")():
                 yield event
 
@@ -135,7 +136,7 @@ class TestSummarizeStrategyPerBlock:
         messages = [_text("user", "task"), _text("assistant", "x" * 10000), _text("user", "latest")]
 
         assert await strategy.apply(ContextState(messages=messages, agent=mock_agent, utilization=0.5)) is True
-        assert received[0][-1]["content"][-1] == ContentBlock(text=_DEFAULT_BLOCK_INSTRUCTIONS)
+        assert received == [_DEFAULT_SUMMARIZE_INSTRUCTIONS]
 
     @pytest.mark.asyncio
     async def test_summarizes_large_text_block(self, mock_agent):

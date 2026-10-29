@@ -422,14 +422,15 @@ export abstract class Model<T extends BaseModelConfig = BaseModelConfig> {
    * `messages` is non-empty, starts with a user message, alternates roles, and keeps every `toolUse` with its
    * `toolResult`. The summary is a user message.
    *
-   * The base implementation is a {@link stream} call with the same system prompt, tools, and messages plus one
-   * trailing instruction. The summary is empty unless the reply ends its turn or hits a stop sequence.
+   * The base implementation is a {@link stream} call, without tools, on one user message holding a flattened
+   * transcript of `messages`, under its own summarization system prompt; it does not send the caller's tools or
+   * system prompt. The summary is empty unless the reply ends its turn or hits a stop sequence.
    *
    * Providers with server-side compaction override this method. An override is called only with the conversation's
    * opening messages, and falls back to `super.summarize()` when native compaction is unavailable.
    *
    * @param messages - The messages to summarize, left unmodified
-   * @param options - The live system prompt and tools, and a custom summarization instruction
+   * @param options - The live system prompt and tools, for an override, and a custom summarization system prompt
    * @returns The summary message and the call's token usage. The summary never contains a tool use; its content is
    *   empty when the model wrote no summary
    */

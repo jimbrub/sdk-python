@@ -1,18 +1,14 @@
 """Summarize reduction method.
 
-Summaries come from ``Model.summarize()``; these helpers configure it, format the summary markers, and convert tool
-result content for it. Strategies handle selection and placement.
+Summaries come from ``Model.summarize()``; these helpers configure it and format the summary markers. Strategies
+handle selection and placement.
 """
 
 from __future__ import annotations
 
-import json
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from typing_extensions import TypedDict
-
-from ...types.content import ContentBlock, Message, Messages
-from ...types.tools import ToolResultContent
 
 if TYPE_CHECKING:
     from ...models.model import Model
@@ -32,30 +28,8 @@ class SummarizeConfig(TypedDict, total=False):
     Attributes:
         model: Model used for summarization. Resolution order: this ``model`` > ``agent.aux_model``
             > ``agent.model``.
-        system_prompt: Custom summarization instruction, replacing the default one sent to ``Model.summarize()``.
+        system_prompt: Custom system prompt for the summarization model.
     """
 
     model: Model
     system_prompt: str
-
-
-def _block_summary_request(content: list[ContentBlock]) -> Messages:
-    """Return the ``Model.summarize()`` input for one block: its content as a delimited user turn."""
-    return [Message(role="user", content=[ContentBlock(text="<content>"), *content, ContentBlock(text="</content>")])]
-
-
-def _tool_result_to_content_blocks(content: list[ToolResultContent]) -> list[ContentBlock]:
-    """Convert ToolResultContent list to ContentBlocks ``Model.summarize()`` accepts.
-
-    JSON is rendered as text and video as a placeholder; text, images, and documents pass through, and anything else
-    is left out.
-    """
-    blocks: list[ContentBlock] = []
-    for item in content:
-        if "json" in item:
-            blocks.append(ContentBlock(text=json.dumps(item["json"], indent=2)))
-        elif "video" in item:
-            blocks.append(ContentBlock(text="[video omitted]"))
-        elif "text" in item or "image" in item or "document" in item:
-            blocks.append(cast(ContentBlock, item))
-    return blocks

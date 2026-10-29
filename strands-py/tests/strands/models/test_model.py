@@ -1,3 +1,4 @@
+import copy
 import json
 import math
 import unittest.mock
@@ -718,12 +719,22 @@ def _recording_stream(received, *texts, stop_reason="end_turn"):
 
 class TestSummarize:
     @pytest.mark.asyncio
-    async def test_streams_the_messages_with_the_instruction_in_the_trailing_user_turn_and_returns_summary_and_usage(
+    async def test_streams_a_flattened_transcript_under_the_instructions_and_returns_summary_and_usage(
         self, model, tool_specs
     ):
-        messages = [_text("user", "task"), _text("assistant", "answer"), _text("user", "follow up")]
+        messages = [
+            _text("user", "task"),
+            {
+                "role": "assistant",
+                "content": [
+                    {"reasoningContent": {"reasoningText": {"text": "plan", "signature": "sig"}}},
+                    {"toolUse": {"toolUseId": "t1", "name": "shell", "input": {"command": "ls"}}},
+                ],
+            },
+            {"role": "user", "content": [{"toolResult": {"toolUseId": "t1", "status": "success", "content": []}}]},
+        ]
         messages[0]["metadata"] = {"custom": {"pinned": True}}
-        original = [dict(message) for message in messages]
+        original = copy.deepcopy(messages)
         received = []
 
         with unittest.mock.patch.object(model, "stream", _recording_stream(received, " the summary ")):
@@ -736,16 +747,21 @@ class TestSummarize:
             )
 
         exp_request = [
-            _text("user", "task"),
-            _text("assistant", "answer"),
             {
                 "role": "user",
-                "content": [{"text": "follow up"}, {"text": "Keep ids"}],
+                "content": [
+                    {"text": "<content>"},
+                    {"text": "\n---\n[user]"},
+                    {"text": "task"},
+                    {"text": "\n---\n[assistant]"},
+                    {"text": '[tool call: shell] {"command":"ls"}'},
+                    {"text": "\n---\n[user]"},
+                    {"text": "[tool result: shell]"},
+                    {"text": "</content>"},
+                ],
             },
         ]
-        assert received == [
-            (exp_request, tool_specs, "live prompt", {"system_prompt_content": [{"text": "live prompt"}]})
-        ]
+        assert received == [(exp_request, None, "Keep ids", {})]
         assert tru_result == SummarizeResult(
             summary={"role": "user", "content": [{"text": "the summary"}]},
             usage={"inputTokens": 10, "outputTokens": 15, "totalTokens": 25},
@@ -753,15 +769,26 @@ class TestSummarize:
         assert messages == original
 
     @pytest.mark.asyncio
-    async def test_appends_the_default_instruction_as_a_user_turn_after_an_assistant_message(self, model):
-        messages = [_text("user", "task"), _text("assistant", "answer")]
+    async def test_uses_the_default_summarization_system_prompt_without_instructions(self, model):
         received = []
 
         with unittest.mock.patch.object(model, "stream", _recording_stream(received, "summary")):
-            await model.summarize(messages)
+            await model.summarize([_text("user", "task"), _text("assistant", "answer")])
 
-        exp_request = [*messages, _text("user", _DEFAULT_SUMMARIZE_INSTRUCTIONS)]
-        assert received == [(exp_request, None, None, {"system_prompt_content": None})]
+        exp_request = [
+            {
+                "role": "user",
+                "content": [
+                    {"text": "<content>"},
+                    {"text": "\n---\n[user]"},
+                    {"text": "task"},
+                    {"text": "\n---\n[assistant]"},
+                    {"text": "answer"},
+                    {"text": "</content>"},
+                ],
+            },
+        ]
+        assert received == [(exp_request, None, _DEFAULT_SUMMARIZE_INSTRUCTIONS, {})]
 
     @pytest.mark.asyncio
     async def test_returns_an_empty_summary_with_the_usage_when_the_model_writes_no_text(self, model):

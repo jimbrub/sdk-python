@@ -39,7 +39,7 @@ The base class also provides optional methods you can override:
 
 - `count_tokens()`: Estimate input token count (defaults to a character-based heuristic).
 - `estimate_utilization()`: Compute the ratio of input tokens to `context_window_limit` (defaults to 200,000 when not configured). See [Utilization Estimation](../agents/conversation-management/#utilization-estimation).
-- `summarize()`: Summarize messages for the context manager (defaults to a `stream()` call with a summarization instruction). Override it to use your provider's server-side compaction, and call `super().summarize()` when that's unavailable.
+- `summarize()`: Summarize messages for the context manager (defaults to a tool-less `stream()` call on a flattened transcript under a summarization system prompt). Override it to use your provider's server-side compaction, and call `super().summarize()` when that's unavailable.
 </Tab>
 <Tab label="TypeScript">
 
@@ -53,7 +53,7 @@ The base class also provides optional methods you can override:
 
 - `countTokens()`: Estimate input token count (defaults to a character-based heuristic).
 - `estimateUtilization()`: Compute the ratio of input tokens to `contextWindowLimit` (defaults to 200,000 when not configured). See [Utilization Estimation](../agents/conversation-management/#utilization-estimation).
-- `summarize()`: Summarize messages for the context manager (defaults to a `stream()` call with a summarization instruction). Override it to use your provider's server-side compaction, and call `super.summarize()` when that's unavailable.
+- `summarize()`: Summarize messages for the context manager (defaults to a tool-less `stream()` call on a flattened transcript under a summarization system prompt). Override it to use your provider's server-side compaction, and call `super.summarize()` when that's unavailable.
 </Tab>
 </Tabs>
 
