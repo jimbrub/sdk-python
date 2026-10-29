@@ -18,7 +18,7 @@ import type { LocalAgent } from '../../../types/agent.js'
 import type { ContextStrategy, ContextState } from '../../types.js'
 import type { Stash } from '../../stash.js'
 import { RETRIEVAL_TOOL_NAME } from '../../retrieval-tool.js'
-import { isPinned } from '../../../conversation-manager/compression/pin-message.js'
+import { hasPinnedFlag, isPinned } from '../../../conversation-manager/compression/pin-message.js'
 
 /**
  * Target for offload operations. This union is intentionally extensible — new
@@ -236,27 +236,28 @@ export function spliceWithPairs(messages: Message[], toRemove: Message[]): { rem
 }
 
 /**
- * Adds `content` as assistant content at the gap left by removed messages.
+ * Adds a removal marker as assistant content at the gap left by removed messages.
  *
- * The content is appended to an assistant message beside the gap, which keeps that message's
+ * The marker is appended to an assistant message beside the gap, which keeps that message's
  * tracking id and block indices for stash refs, or becomes its own assistant message. It never
- * joins message 0, and the last message is never removed, so new content never ends the history.
+ * joins message 0, and the last message is never removed, so a new marker never ends the history.
  */
-export function insertAssistantContent(messages: Message[], index: number, content: ContentBlock[]): void {
+export function insertMarker(messages: Message[], index: number, text: string): void {
   index = Math.max(1, Math.min(index, messages.length))
+  const block = new TextBlock(text)
   for (const neighbor of [index - 1, index]) {
     const carrier = messages[neighbor]
     if (neighbor > 0 && carrier?.role === 'assistant') {
       messages[neighbor] = new Message({
         role: 'assistant',
-        content: [...carrier.content, ...content],
+        content: [...carrier.content, block],
         trackingId: carrier.trackingId,
         ...(carrier.metadata ? { metadata: carrier.metadata } : {}),
       })
       return
     }
   }
-  messages.splice(index, 0, new Message({ role: 'assistant', content: [...content] }))
+  messages.splice(index, 0, new Message({ role: 'assistant', content: [block] }))
 }
 
 /**
@@ -271,7 +272,7 @@ export function repairAlternation(messages: Message[]): void {
     const current = messages[readIndex]!
     if (writeIndex > 0 && messages[writeIndex - 1]!.role === current.role) {
       const prev = messages[writeIndex - 1]!
-      const pinned = prev.metadata?.custom?.pinned === true || current.metadata?.custom?.pinned === true
+      const pinned = hasPinnedFlag(prev) || hasPinnedFlag(current)
       messages[writeIndex - 1] = new Message({
         role: prev.role,
         content: [...prev.content, ...current.content],
@@ -420,7 +421,7 @@ export abstract class BaseOffloadStrategy implements ContextStrategy {
 
     const marker = this._makeRemovalMarker(removed)
     if (marker) {
-      insertAssistantContent(messages, lowestIndex, [new TextBlock(marker)])
+      insertMarker(messages, lowestIndex, marker)
     }
 
     repairAlternation(messages)
@@ -581,7 +582,7 @@ export class EmergencyTruncateStrategy extends BaseOffloadStrategy {
     const { removed, lowestIndex } = spliceWithPairs(messages, toRemove)
     if (removed === 0) return false
 
-    insertAssistantContent(messages, lowestIndex, [new TextBlock(this._makeRemovalMarker(removed))])
+    insertMarker(messages, lowestIndex, this._makeRemovalMarker(removed))
     repairAlternation(messages)
     return true
   }

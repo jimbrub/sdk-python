@@ -9,7 +9,7 @@ from strands._context_manager.strategies.offload.base import (
     _build_tool_name_map,
     _collect_removable_with_pair,
     _get_oldest_matches,
-    _insert_assistant_content,
+    _insert_marker,
     _message_matches_target,
     _repair_alternation,
     _resolve_tool_filter,
@@ -1088,18 +1088,18 @@ class TestPinnedMessageProtection:
         assert messages[0].get("metadata", {}).get("custom", {}).get("pinned") is True
 
 
-class TestInsertAssistantContent:
-    """Tests for placing assistant content outside message 0."""
+class TestInsertMarker:
+    """Tests for placing removal markers as assistant content outside message 0."""
 
     def test_inserts_assistant_message_between_user_messages(self):
         messages: Messages = [_text("user", "task"), _text("user", "u1")]
-        _insert_assistant_content(messages, 1, [ContentBlock(text="marker")])
+        _insert_marker(messages, 1, "marker")
         assert messages == [_text("user", "task"), _text("assistant", "marker"), _text("user", "u1")]
 
     def test_appends_to_assistant_message_before_gap(self):
         original: Message = {**_text("assistant", "a1"), "tracking_id": "msg-1", "metadata": {"custom": {"k": "v"}}}
         messages: Messages = [_text("user", "task"), original, _text("user", "u1")]
-        _insert_assistant_content(messages, 2, [ContentBlock(text="marker")])
+        _insert_marker(messages, 2, "marker")
         assert messages[1]["content"] == [ContentBlock(text="a1"), ContentBlock(text="marker")]
         assert messages[1]["tracking_id"] == "msg-1"
         assert messages[1]["metadata"] == {"custom": {"k": "v"}}
@@ -1108,7 +1108,7 @@ class TestInsertAssistantContent:
 
     def test_appends_to_assistant_message_after_gap(self):
         messages: Messages = [_text("user", "task"), _text("assistant", "a1"), _text("user", "u1")]
-        _insert_assistant_content(messages, 1, [ContentBlock(text="marker")])
+        _insert_marker(messages, 1, "marker")
         assert messages[1]["content"] == [ContentBlock(text="a1"), ContentBlock(text="marker")]
         assert len(messages) == 3
 
@@ -1118,7 +1118,7 @@ class TestInsertAssistantContent:
     )
     def test_clamps_index_into_history_after_message_zero(self, index, expected):
         messages: Messages = [_text("user", "task"), _text("user", "u1")]
-        _insert_assistant_content(messages, index, [ContentBlock(text="marker")])
+        _insert_marker(messages, index, "marker")
         assert [message["content"][0]["text"] for message in messages] == expected
 
 

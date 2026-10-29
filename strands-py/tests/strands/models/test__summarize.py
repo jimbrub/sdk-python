@@ -2,63 +2,60 @@
 
 import json
 
-from strands.models._summarize import _flatten_messages_to_content, _tool_result_to_content_blocks
+from strands.models._summarize import _flatten_messages_to_content
 from strands.types.content import ContentBlock, Message, Messages
 from strands.types.tools import ToolResult, ToolUse
 
 
-class TestToolResultToContentBlocks:
-    """Tests for converting tool result content to content blocks."""
+def _tool_result_message(content):
+    return Message(
+        role="user",
+        content=[ContentBlock(toolResult=ToolResult(toolUseId="t1", status="success", content=content))],
+    )
 
-    def test_converts_text_content(self):
-        content = [{"text": "hello"}]
-        tru_result = _tool_result_to_content_blocks(content)
-        assert tru_result == [ContentBlock(text="hello")]
 
-    def test_passes_through_non_text_content(self):
-        content = [{"image": {"format": "png", "source": {"bytes": b"data"}}}]
-        tru_result = _tool_result_to_content_blocks(content)
-        assert len(tru_result) == 1
+class TestFlattenToolResultContent:
+    """Tests for flattening a tool result's content."""
 
-    def test_handles_mixed_content(self):
-        content = [
-            {"text": "first"},
-            {"image": {"format": "png", "source": {"bytes": b"data"}}},
-            {"text": "second"},
+    def test_passes_text_and_images_through(self):
+        image = {"image": {"format": "png", "source": {"bytes": b"data"}}}
+        messages = [_tool_result_message([{"text": "first"}, image, {"text": "second"}])]
+
+        tru_result = _flatten_messages_to_content(messages)
+        exp_result = [
+            ContentBlock(text="\n---\n[user]"),
+            ContentBlock(text="[tool result]"),
+            ContentBlock(text="first"),
+            ContentBlock(**image),
+            ContentBlock(text="second"),
         ]
-        tru_result = _tool_result_to_content_blocks(content)
-        assert len(tru_result) == 3
-        assert tru_result[0] == ContentBlock(text="first")
-        assert tru_result[2] == ContentBlock(text="second")
+        assert tru_result == exp_result
 
+    def test_renders_json_as_indented_text(self):
+        messages = [_tool_result_message([{"text": "plain text"}, {"json": {"key": "value", "count": 42}}])]
 
-class TestToolResultToContentBlocksJson:
-    """Tests for JSON content in tool_result_to_content_blocks."""
-
-    def test_converts_json_content_to_text(self):
-        content = [{"json": {"key": "value", "count": 42}}]
-        tru_result = _tool_result_to_content_blocks(content)
-        assert len(tru_result) == 1
-        assert tru_result[0]["text"] == '{\n  "key": "value",\n  "count": 42\n}'
-
-    def test_handles_mixed_json_and_text(self):
-        content = [
-            {"text": "plain text"},
-            {"json": {"nested": True}},
+        tru_result = _flatten_messages_to_content(messages)
+        exp_result = [
+            ContentBlock(text="\n---\n[user]"),
+            ContentBlock(text="[tool result]"),
+            ContentBlock(text="plain text"),
+            ContentBlock(text='{\n  "key": "value",\n  "count": 42\n}'),
         ]
-        tru_result = _tool_result_to_content_blocks(content)
-        assert len(tru_result) == 2
-        assert tru_result[0] == ContentBlock(text="plain text")
-        assert tru_result[1]["text"] == '{\n  "nested": true\n}'
-
-
-class TestToolResultToContentBlocksVideo:
-    """Tests for video content in tool_result_to_content_blocks."""
+        assert tru_result == exp_result
 
     def test_renders_video_as_a_placeholder(self):
-        content = [{"text": "clip"}, {"video": {"format": "mp4", "source": {"bytes": b"data"}}}]
-        tru_result = _tool_result_to_content_blocks(content)
-        assert tru_result == [ContentBlock(text="clip"), ContentBlock(text="[video omitted]")]
+        messages = [
+            _tool_result_message([{"text": "clip"}, {"video": {"format": "mp4", "source": {"bytes": b"data"}}}])
+        ]
+
+        tru_result = _flatten_messages_to_content(messages)
+        exp_result = [
+            ContentBlock(text="\n---\n[user]"),
+            ContentBlock(text="[tool result]"),
+            ContentBlock(text="clip"),
+            ContentBlock(text="[video omitted]"),
+        ]
+        assert tru_result == exp_result
 
 
 class TestFlattenMessagesToContent:
@@ -70,10 +67,13 @@ class TestFlattenMessagesToContent:
             Message(role="assistant", content=[ContentBlock(text="hi")]),
         ]
         tru_result = _flatten_messages_to_content(messages)
-        assert tru_result[0] == ContentBlock(text="\n---\n[user]")
-        assert tru_result[1] == ContentBlock(text="hello")
-        assert tru_result[2] == ContentBlock(text="\n---\n[assistant]")
-        assert tru_result[3] == ContentBlock(text="hi")
+        exp_result = [
+            ContentBlock(text="\n---\n[user]"),
+            ContentBlock(text="hello"),
+            ContentBlock(text="\n---\n[assistant]"),
+            ContentBlock(text="hi"),
+        ]
+        assert tru_result == exp_result
 
     def test_extracts_tool_result_content(self):
         messages = [

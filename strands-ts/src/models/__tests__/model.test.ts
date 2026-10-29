@@ -11,7 +11,7 @@ import { CitationsBlock } from '../../types/citations.js'
 import { TestModelProvider, collectGenerator } from '../../__fixtures__/model-test-helpers.js'
 import { MaxTokensError, ModelError } from '../../errors.js'
 import { Model } from '../model.js'
-import { DEFAULT_SUMMARIZE_INSTRUCTIONS } from '../summarize.js'
+import { DEFAULT_SUMMARIZER_SYSTEM_PROMPT } from '../summarize.js'
 import { mergeModelInfo, type ModelInfo } from '../model-info.js'
 import type { BaseModelConfig, StreamOptions } from '../model.js'
 import { isModelStreamEvent, type ModelStreamEvent } from '../streaming.js'
@@ -1406,7 +1406,7 @@ describe('summarize', () => {
         ],
       },
     ])
-    expect(options).toEqual({ systemPrompt: DEFAULT_SUMMARIZE_INSTRUCTIONS })
+    expect(options).toEqual({ systemPrompt: DEFAULT_SUMMARIZER_SYSTEM_PROMPT })
   })
 
   it('joins text and citation blocks with newlines and skips other blocks', async () => {
@@ -1486,6 +1486,42 @@ describe('summarize', () => {
       summary: new Message({ role: 'user', content: [], trackingId: anyTrackingId }),
       usage,
     })
+  })
+
+  it('returns an empty summary with the usage when the stream ends without a message stop', async () => {
+    const model = new TestModelProvider(async function* () {
+      yield { type: 'modelMessageStartEvent', role: 'assistant' }
+      yield { type: 'modelContentBlockDeltaEvent', delta: { type: 'textDelta', text: 'partial' } }
+      yield { type: 'modelContentBlockStopEvent' }
+      yield { type: 'modelMetadataEvent', usage }
+    })
+
+    const result = await model.summarize([text('user', 'task')])
+
+    expect(result).toEqual({
+      summary: new Message({ role: 'user', content: [], trackingId: anyTrackingId }),
+      usage,
+    })
+  })
+
+  it('rethrows other model errors', async () => {
+    const error = new ModelError('provider failed')
+    const model = new TestModelProvider(async function* () {
+      yield { type: 'modelMessageStartEvent', role: 'assistant' }
+      throw error
+    })
+
+    await expect(model.summarize([text('user', 'task')])).rejects.toBe(error)
+  })
+
+  it('forwards the cancel signal to the stream call', async () => {
+    const model = new MockMessageModel().addTurn({ type: 'textBlock', text: 'summary' })
+    const streamSpy = vi.spyOn(model, 'stream')
+    const cancelSignal = new AbortController().signal
+
+    await model.summarize([text('user', 'task')], { cancelSignal })
+
+    expect(streamSpy.mock.calls[0]![1]).toEqual({ systemPrompt: DEFAULT_SUMMARIZER_SYSTEM_PROMPT, cancelSignal })
   })
 
   it('returns an empty summary with the usage when the model writes no text', async () => {

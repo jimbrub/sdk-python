@@ -224,21 +224,22 @@ def _splice_with_pairs(messages: Messages, to_remove: list[Message]) -> tuple[in
     return len(to_splice), min(to_splice)
 
 
-def _insert_assistant_content(messages: Messages, index: int, content: list[ContentBlock]) -> None:
-    """Add ``content`` as assistant content at the gap left by removed messages.
+def _insert_marker(messages: Messages, index: int, text: str) -> None:
+    """Add a removal marker as assistant content at the gap left by removed messages.
 
-    The content is appended to an assistant message beside the gap, which keeps that message's
+    The marker is appended to an assistant message beside the gap, which keeps that message's
     tracking id and block indices for stash refs, or becomes its own assistant message. It never
-    joins message 0, and the last message is never removed, so new content never ends the history.
+    joins message 0, and the last message is never removed, so a new marker never ends the history.
     """
     index = max(1, min(index, len(messages)))
+    block = ContentBlock(text=text)
     for neighbor in (index - 1, index):
         if 0 < neighbor < len(messages) and messages[neighbor]["role"] == "assistant":
             carrier = messages[neighbor].copy()
-            carrier["content"] = [*carrier["content"], *content]
+            carrier["content"] = [*carrier["content"], block]
             messages[neighbor] = carrier
             return
-    messages.insert(index, Message(role="assistant", content=list(content)))
+    messages.insert(index, Message(role="assistant", content=[block]))
 
 
 def _repair_alternation(messages: Messages) -> None:
@@ -408,7 +409,7 @@ class BaseOffloadStrategy(ABC):
 
         marker = self._make_removal_marker(removed)
         if marker:
-            _insert_assistant_content(messages, lowest_index, [ContentBlock(text=marker)])
+            _insert_marker(messages, lowest_index, marker)
 
         _repair_alternation(messages)
         return True

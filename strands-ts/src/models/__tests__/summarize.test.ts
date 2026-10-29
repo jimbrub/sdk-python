@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { flattenMessagesToContent, toolResultToContentBlocks } from '../summarize.js'
+import { flattenMessagesToContent } from '../summarize.js'
 import { AudioBlock, ImageBlock, VideoBlock } from '../../types/media.js'
 import { CitationsBlock } from '../../types/citations.js'
 import {
@@ -13,8 +13,8 @@ import {
   ToolUseBlock,
 } from '../../types/messages.js'
 
-describe('toolResultToContentBlocks', () => {
-  it('renders JSON as text and video as a placeholder, and passes text and images through', () => {
+describe('flattenMessagesToContent', () => {
+  it('renders tool result JSON as text and video as a placeholder, and passes text and images through', () => {
     const bytes = new Uint8Array([1])
     const image = new ImageBlock({ format: 'png', source: { bytes } })
     const content = [
@@ -23,17 +23,20 @@ describe('toolResultToContentBlocks', () => {
       new VideoBlock({ format: 'mp4', source: { bytes } }),
       image,
     ]
+    const messages = [
+      new Message({ role: 'user', content: [new ToolResultBlock({ toolUseId: 't1', status: 'success', content })] }),
+    ]
 
-    expect(toolResultToContentBlocks(content)).toEqual([
+    expect(flattenMessagesToContent(messages)).toEqual([
+      new TextBlock('\n---\n[user]'),
+      new TextBlock('[tool result]'),
       new TextBlock('out'),
       new TextBlock(JSON.stringify({ ok: true }, null, 2)),
       new TextBlock('[video omitted]'),
       image,
     ])
   })
-})
 
-describe('flattenMessagesToContent', () => {
   it('excludes reasoning blocks', () => {
     const messages = [
       new Message({

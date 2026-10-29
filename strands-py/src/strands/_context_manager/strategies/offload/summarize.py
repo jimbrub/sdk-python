@@ -6,13 +6,13 @@ import functools
 import logging
 from typing import TYPE_CHECKING
 
-from ....agent.conversation_manager.compression.pin_message import _has_pinned_flag, is_pinned
+from ....agent.conversation_manager.compression.pin_message import is_pinned
 from ....event_loop.streaming import _record_usage
-from ....models._summarize import _tool_result_to_content_blocks
+from ....models._summarize import SummarizeResult
 from ....models.model import Model
 from ....types.content import ContentBlock, Message, Messages, Role, _ensure_tracking_id
 from ....types.tools import ToolResult, ToolResultContent
-from ...methods.summarize import SummarizeConfig, _format_summarized
+from ...methods.summarize import _SUMMARIZED_PREFIX, SummarizeConfig, _format_summarized
 from ...stash import _format_stash_refs
 from ...types import ContextState, is_tool_result_block, is_tool_use_block
 from .base import (
@@ -30,10 +30,6 @@ if TYPE_CHECKING:
     from ....agent.invocation_context import InvocationContext
 
 logger = logging.getLogger(__name__)
-
-# Opens a compaction request whose selection starts with an assistant turn, since providers require a
-# conversation to start with a user message.
-_EXCERPT_OPENER = "[Earlier conversation omitted]"
 
 
 def _compaction_split_index(messages: Messages, preserved_messages: int | float) -> int:
@@ -82,30 +78,22 @@ def _with_tool_pairs(messages: Messages, selected: Messages) -> list[int]:
     return sorted({index_map[id(removable)] for pair in pairs for removable in pair})
 
 
-def _compaction_request(selected: Messages) -> Messages:
-    """Return ``selected`` as ``Model.summarize()`` input: alternating roles, opening with a user turn."""
-    request = list(selected)
-    _repair_alternation(request)
-    if request[0]["role"] == "assistant":
-        request.insert(0, Message(role="user", content=[ContentBlock(text=_EXCERPT_OPENER)]))
-    return request
-
-
 def _summary_plan(messages: Messages, indices: list[int]) -> tuple[list[int], tuple[int, Role]] | None:
     """Return the indices to summarize and where their summary goes, so no pinned message gains content, or None.
 
     A summary inside a pinned message would never be summarized again, so each pass would grow that message. The
     summary goes at the first run of selected messages whose kept neighbors leave it a role: joining an unpinned
     neighbor of that role, or standing alone between neighbors of the other role. Every other run is removed only
-    when that joins no pinned message and not message 0; the rest stay in the history.
+    when its kept neighbors alternate, so no two kept messages merge; the rest stay in the history. A tool result
+    whose tool use is pinned counts as pinned, as ``is_pinned`` defines it.
     """
     runs = _runs(indices)
-    for slot_run in runs:
-        role = _slot_role(messages, slot_run)
-        if role is not None:
-            kept = [index for run in runs if run is slot_run or _removable(messages, run) for index in run]
-            return kept, (slot_run[0], role)
-    return None
+    slot = _first_slot(messages, runs)
+    if slot is None:
+        return None
+    slot_run, role = slot
+    kept = [index for run in runs if run is slot_run or _removable(messages, run) for index in run]
+    return kept, (slot_run[0], role)
 
 
 def _runs(indices: list[int]) -> list[list[int]]:
@@ -119,58 +107,118 @@ def _runs(indices: list[int]) -> list[list[int]]:
     return runs
 
 
+def _first_slot(messages: Messages, runs: list[list[int]]) -> tuple[list[int], Role] | None:
+    """Return the first run a summary can take the place of, and the summary's role there, or None."""
+    for run in runs:
+        role = _slot_role(messages, run)
+        if role is not None:
+            return run, role
+    return None
+
+
 def _removable(messages: Messages, run: list[int]) -> bool:
-    """Whether removing ``run`` leaves alternating neighbors, or joins two unpinned ones other than message 0."""
+    """Whether removing ``run`` leaves its kept neighbors alternating, so no two kept messages merge."""
     start, end = run[0], run[-1] + 1
     if end >= len(messages):
         return False
-    after = messages[end]
-    if start == 0:
-        return after["role"] == "user"
-    before = messages[start - 1]
-    if before["role"] != after["role"]:
-        return True
-    return start > 1 and not _has_pinned_flag(before) and not _has_pinned_flag(after)
+    before_role = messages[start - 1]["role"] if start > 0 else "assistant"
+    return before_role != messages[end]["role"]
+
+
+_OTHER_ROLE: dict[Role, Role] = {"user": "assistant", "assistant": "user"}
+
+
+def _alternates(messages: Messages) -> bool:
+    """Whether no two consecutive ``messages`` share a role."""
+    return all(earlier["role"] != later["role"] for earlier, later in zip(messages, messages[1:], strict=False))
+
+
+def _is_summary(message: Message) -> bool:
+    """Whether ``message`` holds only ``[Summarized: ...]`` markers."""
+    return all(block.get("text", "").startswith(_SUMMARIZED_PREFIX) for block in message["content"])
 
 
 def _slot_role(messages: Messages, run: list[int]) -> Role | None:
     """Return the role of a summary in place of ``run``, preferring to follow the message before it, if any fits.
 
-    A role fits when no locked neighbor has it: a pinned neighbor, or message 0 when the run starts at 1.
+    A role fits when no locked neighbor has it. Between two neighbors of one role only the other role fits, so the
+    summary stands alone instead of joining the two neighbors into one message.
     """
     start, end = run[0], run[-1] + 1
-    before = messages[start - 1] if start > 0 else None
-    after = messages[end] if end < len(messages) else None
-    locked = [message for message in (before, after) if message is not None and _has_pinned_flag(message)]
+    locked = _locked_roles(messages, start, end)
+    before: Role | None = messages[start - 1]["role"] if start > 0 else None
+    after: Role | None = messages[end]["role"] if end < len(messages) else None
+    roles: tuple[Role, ...] = ("user",)
+    if before:
+        roles = (_OTHER_ROLE[before],) if after == before else (before, _OTHER_ROLE[before])
+    return next((role for role in roles if role not in locked), None)
+
+
+def _locked_roles(messages: Messages, start: int, end: int) -> set[Role]:
+    """Return the roles of the locked neighbors of ``messages[start:end]``.
+
+    A neighbor is locked when it is pinned, or when it is message 0 and the run starts at 1.
+    """
+    locked = [index for index in (start - 1, end) if 0 <= index < len(messages) and is_pinned(messages, index)]
     if start == 1:
-        locked.append(messages[0])
-    if before is None:
-        return None if any(message["role"] == "user" for message in locked) else "user"
-    other: Role = "user" if before["role"] == "assistant" else "assistant"
-    roles = (other, before["role"]) if any(message is before for message in locked) else (before["role"], other)
-    return next((role for role in roles if not any(message["role"] == role for message in locked)), None)
+        locked.append(0)
+    return {messages[index]["role"] for index in locked}
 
 
-def _place_summary(messages: Messages, indices: list[int], slot: tuple[int, Role], summary: Message) -> None:
-    """Replace the messages at ``indices`` with ``summary`` at ``slot``.
+def _place_summary(messages: Messages, indices: list[int], slot: tuple[int, Role], summary: Message) -> bool:
+    """Replace the messages at ``indices`` with ``summary`` at ``slot``, or leave ``messages`` unchanged.
 
-    Joining a kept message appends to it, which keeps its tracking id and block indices for stash refs. A user
-    summary leads the user message after it instead, so the conversation reads in order.
+    A text summary takes the slot's role. When a kept neighbor has that role, the summary is appended to it,
+    after its content, which keeps that message's tracking id, metadata and block indices for stash refs; otherwise
+    it stands alone.
+
+    A summary holding other content, such as an override's provider-native compaction block, is placed verbatim:
+    its own message with its own role, never joined with another. It fits only between kept neighbors of the other
+    role, so it must take the role of the last message it summarizes when the kept messages alternate. When it does
+    not fit, ``messages`` is left unchanged.
+
+    Returns:
+        Whether the summary was placed.
     """
     start, role = slot
+    removed = set(indices)
+    kept = [message for index, message in enumerate(messages) if index not in removed]
     position = start - sum(1 for index in indices if index < start)
-    for index in reversed(indices):
-        del messages[index]
+    if _is_text(summary):
+        _join_or_insert(kept, position, role, summary)
+    elif _alternates_at(kept, position, summary["role"]):
+        placed = summary.copy()
+        _ensure_tracking_id(placed)
+        kept.insert(position, placed)
+    else:
+        return False
+    _repair_alternation(kept)
+    messages[:] = kept
+    return True
+
+
+def _is_text(summary: Message) -> bool:
+    """Whether ``summary`` holds only text blocks."""
+    return all("text" in block for block in summary["content"])
+
+
+def _alternates_at(messages: Messages, position: int, role: Role) -> bool:
+    """Whether a message of ``role`` inserted at ``position`` differs in role from both its neighbors."""
+    neighbors = messages[max(position - 1, 0) : position + 1]
+    return all(neighbor["role"] != role for neighbor in neighbors)
+
+
+def _join_or_insert(messages: Messages, position: int, role: Role, summary: Message) -> None:
+    """Append ``summary``'s content to the kept neighbor of ``role`` at ``position``, or insert it there alone."""
     carrier = _carrier(messages, position, role)
     if carrier is None:
-        placed = summary.copy() if summary["role"] == role else Message(role=role, content=list(summary["content"]))
+        placed = Message(role=role, content=list(summary["content"]))
         _ensure_tracking_id(placed)
         messages.insert(position, placed)
-    else:
-        joined = messages[carrier].copy()
-        joined["content"] = [*joined["content"], *summary["content"]]
-        messages[carrier] = joined
-    _repair_alternation(messages)
+        return
+    joined = messages[carrier].copy()
+    joined["content"] = [*joined["content"], *summary["content"]]
+    messages[carrier] = joined
 
 
 async def _with_summarized_marker(summary: Message, summarized: Messages, model: Model) -> Message:
@@ -179,7 +227,7 @@ async def _with_summarized_marker(summary: Message, summarized: Messages, model:
     A summary holding other content, such as an override's provider-native compaction block, is returned unchanged:
     the provider needs it back as it sent it.
     """
-    if not all("text" in block for block in summary["content"]):
+    if not _is_text(summary):
         return summary
     tokens = await model.count_tokens(summarized)
     text = "\n".join(block["text"] for block in summary["content"])
@@ -188,12 +236,38 @@ async def _with_summarized_marker(summary: Message, summarized: Messages, model:
 
 
 def _carrier(messages: Messages, position: int, role: Role) -> int | None:
-    """Return the index of the kept message the summary appends to, or None when it stands alone or leads."""
+    """Return the index of the kept neighbor of ``role`` the summary appends to, or None when it stands alone.
+
+    Message 0 is never a carrier unless the summary takes the place of the messages before it.
+    """
     if position > 1 and messages[position - 1]["role"] == role:
         return position - 1
-    if 0 < position < len(messages) and role == "assistant" and messages[position]["role"] == role:
+    if position < len(messages) and messages[position]["role"] == role:
         return position
     return None
+
+
+def _record_summary_usage(invocation_context: InvocationContext | None, result: SummarizeResult) -> None:
+    """Add a ``Model.summarize()`` call's usage, if it reported any, to the request it ran in."""
+    if result.usage:
+        _record_usage(invocation_context, result.usage)
+
+
+def _tool_use_for(messages: Messages, tool_use_id: str) -> ContentBlock | None:
+    """Return the ``toolUse`` block with ``tool_use_id`` in ``messages``, if any."""
+    blocks = (block for message in messages for block in message["content"] if "toolUse" in block)
+    return next((block for block in blocks if block["toolUse"]["toolUseId"] == tool_use_id), None)
+
+
+def _block_request(block: ContentBlock, message: Message, messages: Messages) -> Messages:
+    """Return the ``Model.summarize()`` input for one block of ``message``.
+
+    The block goes in a message of ``message``'s role. A tool result follows the tool use it answers, when the
+    history holds it, so the summarizer sees which tool produced it.
+    """
+    request = [Message(role=message["role"], content=[block])]
+    tool_use = _tool_use_for(messages, block["toolResult"]["toolUseId"]) if "toolResult" in block else None
+    return [Message(role="assistant", content=[tool_use]), *request] if tool_use else request
 
 
 class SummarizeStrategy(BaseOffloadStrategy):
@@ -242,7 +316,9 @@ class SummarizeStrategy(BaseOffloadStrategy):
         """
         messages = context.messages
         if self._target not in (None, "*") or self._threshold is not None:
-            return _with_tool_pairs(messages, await self._get_eligible_messages(context))
+            indices = _with_tool_pairs(messages, await self._get_eligible_messages(context))
+            # Re-summarizing a lone earlier summary frees nothing.
+            return [] if len(indices) == 1 and _is_summary(messages[indices[0]]) else indices
         split = _recency_split(messages, self._preserve_recent)
         selected = [index for index in range(split) if not is_pinned(messages, index)]
         # After a pass behind a pinned message, the only unpinned message before the cut is that pass's summary.
@@ -266,20 +342,21 @@ class SummarizeStrategy(BaseOffloadStrategy):
         selected = [messages[index] for index in indices]
 
         # Server-side compaction replaces the start of the conversation, so a provider override only gets the
-        # conversation's first messages, opening with its own user turn; any other selection gets the base summary.
-        prefix = indices == list(range(len(indices))) and messages[0]["role"] == "user"
+        # conversation's first messages, opening with a user turn and alternating; any other selection gets the base
+        # summary.
+        prefix = indices == list(range(len(indices))) and messages[0]["role"] == "user" and _alternates(selected)
         summarize = model.summarize if prefix else functools.partial(Model.summarize, model)
         result = await summarize(
-            _compaction_request(selected),
+            selected,
             # A server-side compaction must carry the live system prompt and tools, or the provider
             # treats it as a different conversation.
             tool_specs=agent.tool_registry.get_all_tool_specs(),
             system_prompt=agent.system_prompt,
             system_prompt_content=agent.system_prompt_content,
             summarizer_system_prompt=self._config.get("system_prompt"),
+            cancel_signal=agent.cancel_signal,
         )
-        if result.usage:
-            _record_usage(context.invocation_context, result.usage)
+        _record_summary_usage(context.invocation_context, result)
         if not result.summary["content"]:
             logger.warning(
                 "summarized=<%s> | model summarize returned no summary | leaving history unchanged", len(indices)
@@ -287,7 +364,14 @@ class SummarizeStrategy(BaseOffloadStrategy):
             return False
 
         summary = await _with_summarized_marker(result.summary, selected, model)
-        _place_summary(messages, indices, slot, summary)
+        if not _place_summary(messages, indices, slot, summary):
+            logger.warning(
+                "summarized=<%s>, role=<%s> | summary does not alternate with the kept messages | "
+                "leaving history unchanged",
+                len(indices),
+                summary["role"],
+            )
+            return False
         logger.debug("summarized=<%s> | compacted messages", len(indices))
         return True
 
@@ -308,8 +392,7 @@ class SummarizeStrategy(BaseOffloadStrategy):
 
         if "toolResult" in block:
             tool_result = block["toolResult"]
-            content_blocks = _tool_result_to_content_blocks(tool_result["content"])
-            summary = await self._try_summarize(content_blocks, model, message, invocation_context)
+            summary = await self._try_summarize(block, model, message, agent, invocation_context)
             if not summary:
                 return None
 
@@ -325,7 +408,9 @@ class SummarizeStrategy(BaseOffloadStrategy):
             )
 
         if "text" in block:
-            summary = await self._try_summarize([ContentBlock(text=block["text"])], model, message, invocation_context)
+            summary = await self._try_summarize(
+                ContentBlock(text=block["text"]), model, message, agent, invocation_context
+            )
             if not summary:
                 return None
 
@@ -333,23 +418,22 @@ class SummarizeStrategy(BaseOffloadStrategy):
             marker = _format_summarized("text block", tokens, summary) + refs
             return ContentBlock(text=marker)
 
-        if "image" in block or "document" in block:
-            summary = await self._try_summarize([block], model, message, invocation_context)
-            if summary:
-                logger.debug(
-                    "tracking_id=<%s>, tokens=<%s> | summarized media block", message.get("tracking_id"), tokens
-                )
-                marker = _format_summarized("media block", tokens, summary) + refs
-                return ContentBlock(text=marker)
+        media = "image" in block or "document" in block
+        summary = await self._try_summarize(block, model, message, agent, invocation_context) if media else None
+        if summary:
+            logger.debug("tracking_id=<%s>, tokens=<%s> | summarized media block", message.get("tracking_id"), tokens)
+            marker = _format_summarized("media block", tokens, summary) + refs
+            return ContentBlock(text=marker)
 
         logger.debug("tracking_id=<%s>, tokens=<%s> | offloaded media block", message.get("tracking_id"), tokens)
         return ContentBlock(text=f"[Offloaded: ~{tokens} tokens]{refs}")
 
     async def _try_summarize(
         self,
-        content: list[ContentBlock],
+        block: ContentBlock,
         model: Model,
         message: Message,
+        agent: Agent,
         invocation_context: InvocationContext | None = None,
     ) -> str | None:
         """Summarize one block; a failure is logged and leaves the block unsummarized so the pass continues."""
@@ -357,18 +441,18 @@ class SummarizeStrategy(BaseOffloadStrategy):
             # A lone block is not the conversation's start, so it gets the base summary.
             result = await Model.summarize(
                 model,
-                [Message(role="user", content=content)],
+                _block_request(block, message, agent.messages),
                 summarizer_system_prompt=self._config.get("system_prompt"),
+                cancel_signal=agent.cancel_signal,
             )
         except Exception as error:
             logger.warning(
                 "tracking_id=<%s>, error=<%s> | block summarization failed", message.get("tracking_id"), error
             )
             return None
-        if result.usage:
-            _record_usage(invocation_context, result.usage)
-        content = result.summary["content"]
-        return content[0]["text"] if content else None
+        _record_summary_usage(invocation_context, result)
+        summary = result.summary["content"]
+        return summary[0]["text"] if summary else None
 
     def _resolve_model(self, agent: Agent) -> Model | None:
         return self._config.get("model") or agent.aux_model

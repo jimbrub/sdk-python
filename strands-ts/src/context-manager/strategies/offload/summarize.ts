@@ -10,11 +10,11 @@ import { Message, TextBlock, ToolResultBlock, ToolUseBlock, type Role } from '..
 import { DocumentBlock, ImageBlock } from '../../../types/media.js'
 import type { ContentBlock } from '../../../types/messages.js'
 import { Model } from '../../../models/model.js'
-import { toolResultToContentBlocks, type SummarizeOptions, type SummarizeResult } from '../../../models/summarize.js'
+import { type SummarizeOptions, type SummarizeResult } from '../../../models/summarize.js'
 import { unwrapInvocationContext, type InvocationContext } from '../../../agent/invocation-context.js'
 import type { LocalAgent } from '../../../types/agent.js'
 import type { ContextStrategy, ContextState } from '../../types.js'
-import { formatSummarized, type SummarizeConfig } from '../../methods/summarize.js'
+import { formatSummarized, SUMMARIZED_PREFIX, type SummarizeConfig } from '../../methods/summarize.js'
 import { formatStashRefs } from '../../stash.js'
 import { isPinned } from '../../../conversation-manager/compression/pin-message.js'
 import {
@@ -65,12 +65,6 @@ function splitsToolPair(messages: Message[], index: number): boolean {
   return hasToolResult && messages[index - 1]!.content.some((block) => block instanceof ToolUseBlock)
 }
 
-/**
- * Opens a compaction request whose selection starts with an assistant turn, since providers require a
- * conversation to start with a user message.
- */
-const EXCERPT_OPENER = '[Earlier conversation omitted]'
-
 /** Returns the indices of the messages in `selected` and their tool-pair partners, in history order. */
 function withToolPairs(messages: Message[], selected: Message[]): number[] {
   const indexOf = new Map(messages.map((message, index) => [message, index]))
@@ -79,23 +73,11 @@ function withToolPairs(messages: Message[], selected: Message[]): number[] {
   return [...indices].sort((left, right) => left - right)
 }
 
-/** Returns `selected` as `Model.summarize()` input: alternating roles, opening with a user turn. */
-function compactionRequest(selected: Message[]): Message[] {
-  const request = [...selected]
-  repairAlternation(request)
-  if (request[0]!.role === 'assistant') {
-    request.unshift(new Message({ role: 'user', content: [new TextBlock(EXCERPT_OPENER)] }))
-  }
-  return request
-}
-
 /** Where a summary goes in the history, and its role. */
 interface SummarySlot {
   start: number
   role: Role
 }
-
-const hasPinnedFlag = (message: Message): boolean => message.metadata?.custom?.pinned === true
 
 /**
  * Returns the indices to summarize and where their summary goes, so no pinned message gains content, or undefined.
@@ -103,17 +85,15 @@ const hasPinnedFlag = (message: Message): boolean => message.metadata?.custom?.p
  * A summary inside a pinned message would never be summarized again, so each pass would grow that message. The
  * summary goes at the first run of selected messages whose kept neighbors leave it a role: joining an unpinned
  * neighbor of that role, or standing alone between neighbors of the other role. Every other run is removed only
- * when that joins no pinned message and not message 0; the rest stay in the history.
+ * when its kept neighbors alternate, so no two kept messages merge; the rest stay in the history. A tool result
+ * whose tool use is pinned counts as pinned, as `isPinned` defines it.
  */
 function summaryPlan(messages: Message[], indices: number[]): { indices: number[]; slot: SummarySlot } | undefined {
   const all = runs(indices)
-  for (const slotRun of all) {
-    const role = slotRole(messages, slotRun)
-    if (!role) continue
-    const kept = all.filter((run) => run === slotRun || removable(messages, run)).flat()
-    return { indices: kept, slot: { start: slotRun[0]!, role } }
-  }
-  return undefined
+  const slot = firstSlot(messages, all)
+  if (!slot) return undefined
+  const kept = all.filter((run) => run === slot.run || removable(messages, run)).flat()
+  return { indices: kept, slot: { start: slot.run[0]!, role: slot.role } }
 }
 
 /** Splits sorted `indices` into runs of consecutive indices. */
@@ -127,58 +107,112 @@ function runs(indices: number[]): number[][] {
   return result
 }
 
-/** Whether removing `run` leaves alternating neighbors, or joins two unpinned ones other than message 0. */
+/** Returns the first run a summary can take the place of, and the summary's role there, or undefined. */
+function firstSlot(messages: Message[], all: number[][]): { run: number[]; role: Role } | undefined {
+  for (const run of all) {
+    const role = slotRole(messages, run)
+    if (role) return { run, role }
+  }
+  return undefined
+}
+
+/** Whether removing `run` leaves its kept neighbors alternating, so no two kept messages merge. */
 function removable(messages: Message[], run: number[]): boolean {
   const start = run[0]!
   const after = messages[run.at(-1)! + 1]
   if (!after) return false
-  if (start === 0) return after.role === 'user'
-  const before = messages[start - 1]!
-  if (before.role !== after.role) return true
-  return start > 1 && !hasPinnedFlag(before) && !hasPinnedFlag(after)
+  return (messages[start - 1]?.role ?? 'assistant') !== after.role
 }
+
+const OTHER_ROLE: Record<Role, Role> = { user: 'assistant', assistant: 'user' }
 
 /**
  * Returns the role of a summary in place of `run`, preferring to follow the message before it, if any fits.
  *
- * A role fits when no locked neighbor has it: a pinned neighbor, or message 0 when the run starts at 1.
+ * A role fits when no locked neighbor has it.
  */
 function slotRole(messages: Message[], run: number[]): Role | undefined {
   const start = run[0]!
-  const before = messages[start - 1]
-  const locked = [before, messages[run.at(-1)! + 1]].filter(
-    (message): message is Message => !!message && hasPinnedFlag(message)
-  )
-  if (start === 1) locked.push(messages[0]!)
-  if (!before) return locked.some((message) => message.role === 'user') ? undefined : 'user'
-  const other: Role = before.role === 'assistant' ? 'user' : 'assistant'
-  const roles: Role[] = locked.includes(before) ? [other, before.role] : [before.role, other]
-  return roles.find((role) => !locked.some((message) => message.role === role))
+  const end = run.at(-1)! + 1
+  const locked = lockedRoles(messages, start, end)
+  const before = messages[start - 1]?.role
+  const after = messages[end]?.role
+  let roles: Role[] = ['user']
+  if (before) roles = after === before ? [OTHER_ROLE[before]] : [before, OTHER_ROLE[before]]
+  return roles.find((role) => !locked.has(role))
+}
+
+/** Whether no two consecutive `messages` share a role. */
+function alternates(messages: Message[]): boolean {
+  return messages.every((message, index) => index === 0 || messages[index - 1]!.role !== message.role)
+}
+
+/** Whether `message` holds only `[Summarized: ...]` markers. */
+function isSummary(message: Message): boolean {
+  return message.content.every((block) => block instanceof TextBlock && block.text.startsWith(SUMMARIZED_PREFIX))
 }
 
 /**
- * Replaces the messages at `indices` with `summary` at `slot`.
+ * Returns the roles of the locked neighbors of `messages.slice(start, end)`.
  *
- * Joining a kept message appends to it, which keeps its tracking id and block indices for stash refs. A user
- * summary leads the user message after it instead, so the conversation reads in order.
+ * A neighbor is locked when it is pinned, or when it is message 0 and the run starts at 1.
  */
-function placeSummary(messages: Message[], indices: number[], slot: SummarySlot, summary: Message): void {
+function lockedRoles(messages: Message[], start: number, end: number): Set<Role> {
+  const locked = [start - 1, end].filter((index) => index >= 0 && index < messages.length && isPinned(messages, index))
+  if (start === 1) locked.push(0)
+  return new Set(locked.map((index) => messages[index]!.role))
+}
+
+/**
+ * Replaces the messages at `indices` with `summary` at `slot`, or leaves `messages` unchanged.
+ *
+ * A text summary takes the slot's role. When a kept neighbor has that role, the summary is appended to it, after
+ * its content, which keeps that message's tracking id, metadata and block indices for stash refs; otherwise it
+ * stands alone.
+ *
+ * A summary holding other content, such as an override's provider-native compaction block, is placed verbatim:
+ * its own message with its own role, never joined with another. It fits only between kept neighbors of the other
+ * role, so it must take the role of the last message it summarizes when the kept messages alternate. When it does
+ * not fit, `messages` is left unchanged.
+ *
+ * @returns Whether the summary was placed
+ */
+function placeSummary(messages: Message[], indices: number[], slot: SummarySlot, summary: Message): boolean {
+  const removed = new Set(indices)
+  const kept = messages.filter((_, index) => !removed.has(index))
   const position = slot.start - indices.filter((index) => index < slot.start).length
-  for (const index of [...indices].reverse()) messages.splice(index, 1)
-  const carrier = carrierIndex(messages, position, slot.role)
+  if (isText(summary)) joinOrInsert(kept, position, slot.role, summary)
+  else if (alternatesAt(kept, position, summary.role)) kept.splice(position, 0, summary)
+  else return false
+  repairAlternation(kept)
+  messages.splice(0, messages.length, ...kept)
+  return true
+}
+
+/** Whether `summary` holds only text blocks. */
+function isText(summary: Message): boolean {
+  return summary.content.every((block) => block instanceof TextBlock)
+}
+
+/** Whether a message of `role` inserted at `position` differs in role from both its neighbors. */
+function alternatesAt(messages: Message[], position: number, role: Role): boolean {
+  return messages.slice(Math.max(position - 1, 0), position + 1).every((neighbor) => neighbor.role !== role)
+}
+
+/** Appends `summary`'s content to the kept neighbor of `role` at `position`, or inserts it there alone. */
+function joinOrInsert(messages: Message[], position: number, role: Role, summary: Message): void {
+  const carrier = carrierIndex(messages, position, role)
   if (carrier === undefined) {
-    const placed = summary.role === slot.role ? summary : new Message({ role: slot.role, content: summary.content })
-    messages.splice(position, 0, placed)
-  } else {
-    const joined = messages[carrier]!
-    messages[carrier] = new Message({
-      role: joined.role,
-      content: [...joined.content, ...summary.content],
-      trackingId: joined.trackingId,
-      ...(joined.metadata ? { metadata: joined.metadata } : {}),
-    })
+    messages.splice(position, 0, new Message({ role, content: summary.content }))
+    return
   }
-  repairAlternation(messages)
+  const joined = messages[carrier]!
+  messages[carrier] = new Message({
+    role: joined.role,
+    content: [...joined.content, ...summary.content],
+    trackingId: joined.trackingId,
+    ...(joined.metadata ? { metadata: joined.metadata } : {}),
+  })
 }
 
 /**
@@ -188,18 +222,45 @@ function placeSummary(messages: Message[], indices: number[], slot: SummarySlot,
  * the provider needs it back as it sent it.
  */
 async function withSummarizedMarker(summary: Message, summarized: Message[], model: Model): Promise<Message> {
-  if (!summary.content.every((block) => block instanceof TextBlock)) return summary
+  if (!isText(summary)) return summary
   const tokens = await model.countTokens(summarized)
   const text = summary.content.map((block) => (block as TextBlock).text).join('\n')
   const marker = formatSummarized(`${summarized.length} messages`, tokens, text)
   return new Message({ role: summary.role, content: [new TextBlock(marker)] })
 }
 
-/** Returns the index of the kept message the summary appends to, or undefined when it stands alone or leads. */
+/**
+ * Returns the index of the kept neighbor of `role` the summary appends to, or undefined when it stands alone.
+ *
+ * Message 0 is never a carrier unless the summary takes the place of the messages before it.
+ */
 function carrierIndex(messages: Message[], position: number, role: Role): number | undefined {
   if (position > 1 && messages[position - 1]!.role === role) return position - 1
-  if (position > 0 && role === 'assistant' && messages[position]?.role === role) return position
+  if (messages[position]?.role === role) return position
   return undefined
+}
+
+/** Adds a `Model.summarize()` call's usage, if it reported any, to the request it ran in. */
+function recordSummaryUsage(invocationContext: InvocationContext | undefined, result: SummarizeResult): void {
+  if (result.usage) unwrapInvocationContext(invocationContext)?.recordUsage(result.usage)
+}
+
+/** Returns the `toolUse` block with `toolUseId` in `messages`, if any. */
+function toolUseFor(messages: Message[], toolUseId: string): ToolUseBlock | undefined {
+  const blocks = messages.flatMap((message) => message.content)
+  return blocks.find((block): block is ToolUseBlock => block instanceof ToolUseBlock && block.toolUseId === toolUseId)
+}
+
+/**
+ * Returns the `Model.summarize()` input for one block of `message`.
+ *
+ * The block goes in a message of `message`'s role. A tool result follows the tool use it answers, when the history
+ * holds it, so the summarizer sees which tool produced it.
+ */
+function blockRequest(block: ContentBlock, message: Message, messages: Message[]): Message[] {
+  const request = [new Message({ role: message.role, content: [block] })]
+  const toolUse = block instanceof ToolResultBlock ? toolUseFor(messages, block.toolUseId) : undefined
+  return toolUse ? [new Message({ role: 'assistant', content: [toolUse] }), ...request] : request
 }
 
 export class SummarizeStrategy extends BaseOffloadStrategy {
@@ -233,7 +294,11 @@ export class SummarizeStrategy extends BaseOffloadStrategy {
   private async _select(context: ContextState): Promise<number[]> {
     const { messages } = context
     const recencyOnly = (this._target === undefined || this._target === '*') && this._threshold === undefined
-    if (!recencyOnly) return withToolPairs(messages, await this._getEligibleMessages(context))
+    if (!recencyOnly) {
+      const indices = withToolPairs(messages, await this._getEligibleMessages(context))
+      // Re-summarizing a lone earlier summary frees nothing.
+      return indices.length === 1 && isSummary(messages[indices[0]!]!) ? [] : indices
+    }
     const split = recencySplit(messages, this._preserveRecent)
     const selected = Array.from({ length: split }, (_, index) => index).filter((index) => !isPinned(messages, index))
     // After a pass behind a pinned message, the only unpinned message before the cut is that pass's summary.
@@ -255,21 +320,28 @@ export class SummarizeStrategy extends BaseOffloadStrategy {
     const { indices, slot } = plan
 
     const summarized = indices.map((index) => messages[index]!)
-    const request = compactionRequest(summarized)
     const options = this._summarizeOptions(agent)
     // Server-side compaction replaces the start of the conversation, so a provider override only gets the
-    // conversation's first messages, opening with its own user turn; any other selection gets the base summary.
-    const prefix = indices.every((index, position) => index === position) && messages[0]!.role === 'user'
+    // conversation's first messages, opening with a user turn and alternating; any other selection gets the base
+    // summary.
+    const prefix =
+      indices.every((index, position) => index === position) && messages[0]!.role === 'user' && alternates(summarized)
     const result = prefix
-      ? await model.summarize(request, options)
-      : await Model.prototype.summarize.call(model, request, options)
-    if (result.usage) unwrapInvocationContext(context.invocationContext)?.recordUsage(result.usage)
+      ? await model.summarize(summarized, options)
+      : await Model.prototype.summarize.call(model, summarized, options)
+    recordSummaryUsage(context.invocationContext, result)
     if (result.summary.content.length === 0) {
       logger.warn(`summarized=<${indices.length}> | model summarize returned no summary | leaving history unchanged`)
       return false
     }
 
-    placeSummary(messages, indices, slot, await withSummarizedMarker(result.summary, summarized, model))
+    const summary = await withSummarizedMarker(result.summary, summarized, model)
+    if (!placeSummary(messages, indices, slot, summary)) {
+      logger.warn(
+        `summarized=<${indices.length}>, role=<${summary.role}> | summary does not alternate with the kept messages | leaving history unchanged`
+      )
+      return false
+    }
     logger.debug(`summarized=<${indices.length}> | compacted messages`)
     return true
   }
@@ -286,12 +358,7 @@ export class SummarizeStrategy extends BaseOffloadStrategy {
     if (!model) return null
 
     if (block instanceof ToolResultBlock) {
-      const summary = await this._trySummarize(
-        toolResultToContentBlocks(block.content),
-        model,
-        message,
-        invocationContext
-      )
+      const summary = await this._trySummarize(block, model, message, agent, invocationContext)
       if (!summary) return null
 
       logger.debug(`toolUseId=<${block.toolUseId}>, tokens=<${tokens}> | summarized tool result`)
@@ -303,19 +370,18 @@ export class SummarizeStrategy extends BaseOffloadStrategy {
     }
 
     if (block instanceof TextBlock) {
-      const summary = await this._trySummarize([new TextBlock(block.text)], model, message, invocationContext)
+      const summary = await this._trySummarize(new TextBlock(block.text), model, message, agent, invocationContext)
       if (!summary) return null
 
       logger.debug(`trackingId=<${message.trackingId}>, tokens=<${tokens}> | summarized text block`)
       return new TextBlock(`${formatSummarized('text block', tokens, summary)}${formatStashRefs(stashRefs)}`)
     }
 
-    if (block instanceof ImageBlock || block instanceof DocumentBlock) {
-      const summary = await this._trySummarize([block], model, message, invocationContext)
-      if (summary) {
-        logger.debug(`trackingId=<${message.trackingId}>, tokens=<${tokens}> | summarized media block`)
-        return new TextBlock(`${formatSummarized('media block', tokens, summary)}${formatStashRefs(stashRefs)}`)
-      }
+    const media = block instanceof ImageBlock || block instanceof DocumentBlock
+    const summary = media ? await this._trySummarize(block, model, message, agent, invocationContext) : null
+    if (summary) {
+      logger.debug(`trackingId=<${message.trackingId}>, tokens=<${tokens}> | summarized media block`)
+      return new TextBlock(`${formatSummarized('media block', tokens, summary)}${formatStashRefs(stashRefs)}`)
     }
 
     logger.debug(`trackingId=<${message.trackingId}>, tokens=<${tokens}> | offloaded media block`)
@@ -324,16 +390,18 @@ export class SummarizeStrategy extends BaseOffloadStrategy {
 
   /** Summarizes one block; a failure is logged and leaves the block unsummarized so the pass continues. */
   private async _trySummarize(
-    content: ContentBlock[],
+    block: ContentBlock,
     model: Model,
     message: Message,
+    agent: LocalAgent,
     invocationContext?: InvocationContext
   ): Promise<string | null> {
     let result: SummarizeResult
     try {
       // A lone block is not the conversation's start, so it gets the base summary.
-      result = await Model.prototype.summarize.call(model, [new Message({ role: 'user', content })], {
+      result = await Model.prototype.summarize.call(model, blockRequest(block, message, agent.messages), {
         ...(this._config.systemPrompt !== undefined && { summarizerSystemPrompt: this._config.systemPrompt }),
+        cancelSignal: agent.cancelSignal,
       })
     } catch (error) {
       logger.warn(
@@ -341,7 +409,7 @@ export class SummarizeStrategy extends BaseOffloadStrategy {
       )
       return null
     }
-    if (result.usage) unwrapInvocationContext(invocationContext)?.recordUsage(result.usage)
+    recordSummaryUsage(invocationContext, result)
     return (result.summary.content[0] as TextBlock | undefined)?.text ?? null
   }
 
@@ -353,6 +421,7 @@ export class SummarizeStrategy extends BaseOffloadStrategy {
       ...(agent.systemPrompt !== undefined && { systemPrompt: agent.systemPrompt }),
       toolSpecs: agent.toolRegistry.list().map((tool) => tool.toolSpec),
       ...(this._config.systemPrompt !== undefined && { summarizerSystemPrompt: this._config.systemPrompt }),
+      cancelSignal: agent.cancelSignal,
     }
   }
 

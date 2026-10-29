@@ -1,6 +1,7 @@
 import copy
 import json
 import math
+import threading
 import unittest.mock
 import warnings
 from unittest.mock import MagicMock
@@ -11,7 +12,7 @@ from pydantic import BaseModel
 from strands.hooks.events import AfterInvocationEvent
 from strands.models import CacheConfig, SummarizeResult
 from strands.models import Model as SAModel
-from strands.models._summarize import _DEFAULT_SUMMARIZE_INSTRUCTIONS
+from strands.models._summarize import _DEFAULT_SUMMARIZER_SYSTEM_PROMPT
 from strands.models.model import _ModelPlugin
 
 
@@ -761,7 +762,7 @@ class TestSummarize:
                 ],
             },
         ]
-        assert received == [(exp_request, None, "Keep ids", {})]
+        assert received == [(exp_request, None, "Keep ids", {"cancel_signal": None})]
         assert tru_result == SummarizeResult(
             summary={"role": "user", "content": [{"text": "the summary"}]},
             usage={"inputTokens": 10, "outputTokens": 15, "totalTokens": 25},
@@ -788,7 +789,17 @@ class TestSummarize:
                 ],
             },
         ]
-        assert received == [(exp_request, None, _DEFAULT_SUMMARIZE_INSTRUCTIONS, {})]
+        assert received == [(exp_request, None, _DEFAULT_SUMMARIZER_SYSTEM_PROMPT, {"cancel_signal": None})]
+
+    @pytest.mark.asyncio
+    async def test_forwards_the_cancel_signal_to_the_stream_call(self, model):
+        received = []
+        cancel_signal = threading.Event()
+
+        with unittest.mock.patch.object(model, "stream", _recording_stream(received, "summary")):
+            await model.summarize([_text("user", "task")], cancel_signal=cancel_signal)
+
+        assert [kwargs for *_, kwargs in received] == [{"cancel_signal": cancel_signal}]
 
     @pytest.mark.asyncio
     async def test_returns_an_empty_summary_with_the_usage_when_the_model_writes_no_text(self, model):

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest'
 import { Offload } from '../offload/index.js'
 import { compactionSplitIndex } from '../offload/summarize.js'
 import { InvocationContextImpl } from '../../../agent/invocation-context.js'
-import { Message, TextBlock, ToolResultBlock, ToolUseBlock } from '../../../types/messages.js'
+import { Message, ReasoningBlock, TextBlock, ToolResultBlock, ToolUseBlock } from '../../../types/messages.js'
 import { ImageBlock, VideoBlock } from '../../../types/media.js'
 import { logger } from '../../../logging/logger.js'
 import { createMockAgent } from '../../../__fixtures__/agent-helpers.js'
@@ -136,15 +136,34 @@ describe('Offload.summarize', () => {
       expect(vi.mocked(Model.prototype.summarize).mock.contexts).toEqual([auxModel])
     })
 
-    it('sends a block to the base summarize as a user turn with the custom system prompt', async () => {
+    it('sends a block to the base summarize in its source role with the custom system prompt', async () => {
       const largeText = 'x'.repeat(2500 * 4 + 100)
       const message = new Message({ role: 'assistant', content: [new TextBlock(largeText)] })
       const strategy = Offload.summarize('assistantText', { systemPrompt: 'Keep ids' })
+      const context = makeContext([message], 0.9, { stream: vi.fn() })
 
-      expect(await strategy.apply(makeContext([message], 0.9, { stream: vi.fn() }))).toBe(true)
+      expect(await strategy.apply(context)).toBe(true)
       expect(Model.prototype.summarize).toHaveBeenCalledWith(
-        [new Message({ role: 'user', content: [new TextBlock(largeText)], trackingId: anyTrackingId })],
-        { summarizerSystemPrompt: 'Keep ids' }
+        [new Message({ role: 'assistant', content: [new TextBlock(largeText)], trackingId: anyTrackingId })],
+        { summarizerSystemPrompt: 'Keep ids', cancelSignal: context.agent.cancelSignal }
+      )
+    })
+
+    it('sends a tool result after its tool call with the agent cancel signal', async () => {
+      const toolUse = new ToolUseBlock({ name: 'shell', toolUseId: 'call_1', input: { command: 'ls' } })
+      const result = makeToolResultMessage('x'.repeat(2500 * 4 + 100), 'call_1')
+      const resultBlock = result.content[0]!
+      const messages = [new Message({ role: 'assistant', content: [toolUse] }), result]
+      const strategy = Offload.summarize('toolResults')
+      const context = makeContext(messages, 0.9, { stream: vi.fn() })
+
+      expect(await strategy.apply(context)).toBe(true)
+      expect(Model.prototype.summarize).toHaveBeenCalledWith(
+        [
+          new Message({ role: 'assistant', content: [toolUse], trackingId: anyTrackingId }),
+          new Message({ role: 'user', content: [resultBlock], trackingId: anyTrackingId }),
+        ],
+        { cancelSignal: context.agent.cancelSignal }
       )
     })
 
@@ -153,10 +172,12 @@ describe('Offload.summarize', () => {
       const message = new Message({ role: 'assistant', content: [new TextBlock(largeText)] })
       const strategy = Offload.summarize('assistantText')
 
-      expect(await strategy.apply(makeContext([message], 0.9, { stream: vi.fn() }))).toBe(true)
+      const context = makeContext([message], 0.9, { stream: vi.fn() })
+
+      expect(await strategy.apply(context)).toBe(true)
       expect(Model.prototype.summarize).toHaveBeenCalledWith(
-        [new Message({ role: 'user', content: [new TextBlock(largeText)], trackingId: anyTrackingId })],
-        {}
+        [new Message({ role: 'assistant', content: [new TextBlock(largeText)], trackingId: anyTrackingId })],
+        { cancelSignal: context.agent.cancelSignal }
       )
     })
 
@@ -388,11 +409,6 @@ describe('routing through Model.summarize', () => {
     new TextBlock(`[Summarized: ${count} messages, ~5,000 tokens]\n\nsummary`)
   const markedSummary = (count: number): Message =>
     new Message({ role: 'user', content: [marked(count)], trackingId: anyTrackingId })
-  const opener = new Message({
-    role: 'user',
-    content: [new TextBlock('[Earlier conversation omitted]')],
-    trackingId: anyTrackingId,
-  })
   const usage = { inputTokens: 10, outputTokens: 5, totalTokens: 15 }
 
   afterEach(() => {
@@ -434,6 +450,7 @@ describe('routing through Model.summarize', () => {
       systemPrompt: 'live system prompt',
       toolSpecs: [toolSpec],
       summarizerSystemPrompt: 'Keep ids',
+      cancelSignal: context.agent.cancelSignal,
     })
     expect(messages).toEqual([markedSummary(5), ...original.slice(5)])
   })
@@ -532,11 +549,7 @@ describe('routing through Model.summarize', () => {
     expect(await strategy.apply(makeRoutingContext(messages, 0.9, model))).toBe(true)
     expect(received).toEqual([original.slice(0, 6)])
     expect(messages).toEqual([
-      new Message({
-        role: 'user',
-        content: [marked(6), new TextBlock('latest')],
-        trackingId: anyTrackingId,
-      }),
+      new Message({ role: 'user', content: [new TextBlock('latest'), marked(6)], trackingId: original[6]!.trackingId }),
     ])
   })
 
@@ -564,7 +577,7 @@ describe('routing through Model.summarize', () => {
     const original = [...messages]
 
     expect(await strategy.apply(makeRoutingContext(messages, 0.9, model))).toBe(true)
-    expect(received).toEqual([[opener, ...original.slice(0, 4)]])
+    expect(received).toEqual([original.slice(0, 4)])
     expect(model.summarize).not.toHaveBeenCalled()
     expect(vi.mocked(Model.prototype.summarize).mock.contexts).toEqual([model])
     expect(messages).toEqual([markedSummary(4), ...original.slice(4)])
@@ -584,13 +597,13 @@ describe('routing through Model.summarize', () => {
     expect(await strategy.apply(makeRoutingContext(messages, 0.9, model))).toBe(true)
 
     expect(received[1]!.map((message) => message.content)).toEqual([
-      [marked(2), new TextBlock('u4')],
+      [new TextBlock('u4'), marked(2)],
       [new TextBlock('a5')],
     ])
     expect(messages.map((message) => message.content)).toEqual([
       [new TextBlock('task')],
       [new TextBlock('ack')],
-      [marked(2), new TextBlock('u6')],
+      [new TextBlock('u6'), marked(2)],
     ])
   })
 
@@ -711,7 +724,7 @@ describe('routing through Model.summarize', () => {
     const original = [...messages]
 
     expect(await strategy.apply(makeRoutingContext(messages, 0.9, model))).toBe(true)
-    expect(received).toEqual([[opener, ...original.slice(1, 4)]])
+    expect(received).toEqual([original.slice(1, 4)])
     expect(model.summarize).not.toHaveBeenCalled()
     expect(vi.mocked(Model.prototype.summarize).mock.contexts).toEqual([model])
     expect(messages).toEqual([
@@ -732,17 +745,7 @@ describe('routing through Model.summarize', () => {
     const original = [...messages]
 
     expect(await strategy.apply(makeRoutingContext(messages, 0.9, model))).toBe(true)
-    expect(received).toEqual([
-      [
-        original[0],
-        new Message({
-          role: 'assistant',
-          content: [new TextBlock('a'), new TextBlock('b')],
-          trackingId: anyTrackingId,
-        }),
-        original[4],
-      ],
-    ])
+    expect(received).toEqual([[original[0], original[1], original[3], original[4]]])
     expect(model.summarize).not.toHaveBeenCalled()
     expect(messages).toEqual([
       pinned,
@@ -760,10 +763,13 @@ describe('routing through Model.summarize', () => {
     mockSummarize(model)
     const strategy = Offload.summarize('*', { model }).when({ utilization: 0.7, preserveRecent: 2 })
 
-    expect(await strategy.apply(makeRoutingContext(makeHistory(), 0.9, model))).toBe(true)
+    const context = makeRoutingContext(makeHistory(), 0.9, model)
+
+    expect(await strategy.apply(context)).toBe(true)
     expect(model.summarize).toHaveBeenCalledWith(expect.anything(), {
       systemPrompt: 'live system prompt',
       toolSpecs: [toolSpec],
+      cancelSignal: context.agent.cancelSignal,
     })
   })
 
@@ -817,7 +823,7 @@ describe('routing through Model.summarize', () => {
     const original = [...messages]
 
     expect(await strategy.apply(makeRoutingContext(messages, 0.9, model))).toBe(true)
-    expect(received).toEqual([[opener, ...original.slice(1, 3), ...original.slice(5, 7)]])
+    expect(received).toEqual([[...original.slice(1, 3), ...original.slice(5, 7)]])
     expect(model.summarize).not.toHaveBeenCalled()
     expect(messages).toEqual([
       original[0],
@@ -840,32 +846,21 @@ describe('routing through Model.summarize', () => {
     const strategy = Offload.summarize('*', { model }).when({ utilization: 0.7, threshold: 10 })
     const messages = makeHistory()
     const original = [...messages]
-    const tokens = await model.countTokens([original[2]!, original[4]!])
+    const tokens = await model.countTokens([original[2]!])
 
     expect(await strategy.apply(makeRoutingContext(messages, 0.9, model))).toBe(true)
-    expect(received).toEqual([
-      [
-        new Message({
-          role: 'user',
-          content: [...original[2]!.content, ...original[4]!.content],
-          trackingId: anyTrackingId,
-        }),
-      ],
-    ])
+    // Removing the second result would merge the kept messages around it, so it waits for a later pass.
+    expect(received).toEqual([[original[2]]])
     expect(model.summarize).not.toHaveBeenCalled()
     expect(messages).toEqual([
       original[0],
+      original[1],
       new Message({
-        role: 'assistant',
-        content: [
-          new TextBlock('a'),
-          new TextBlock(`[Summarized: 2 messages, ~${tokens.toLocaleString('en-US')} tokens]\n\nsummary`),
-          new TextBlock('b'),
-          new TextBlock('c'),
-        ],
-        trackingId: original[1]!.trackingId,
+        role: 'user',
+        content: [new TextBlock(`[Summarized: 1 messages, ~${tokens.toLocaleString('en-US')} tokens]\n\nsummary`)],
+        trackingId: anyTrackingId,
       }),
-      original[6],
+      ...original.slice(3),
     ])
   })
 
@@ -886,13 +881,183 @@ describe('routing through Model.summarize', () => {
     ]
     const original = [...messages]
 
-    expect(await strategy.apply(makeRoutingContext(messages, 0.9, model))).toBe(true)
-    expect(received).toEqual([[opener, original[1], original[2]]])
+    const context = makeRoutingContext(messages, 0.9, model)
+
+    expect(await strategy.apply(context)).toBe(true)
+    expect(received).toEqual([[original[1], original[2]]])
     expect(model.summarize).not.toHaveBeenCalled()
     expect(Model.prototype.summarize).toHaveBeenCalledWith(expect.anything(), {
       systemPrompt: 'live system prompt',
       toolSpecs: [toolSpec],
+      cancelSignal: context.agent.cancelSignal,
     })
+  })
+})
+
+describe('summary placement', () => {
+  const text = (role: 'user' | 'assistant', value: string, trackingId?: string): Message =>
+    new Message({ role, content: [new TextBlock(value)], ...(trackingId && { trackingId }) })
+  const pinned = { custom: { pinned: true } }
+  const redacted = new ReasoningBlock({ redactedContent: new Uint8Array([120]) })
+  const marked = (count: number): TextBlock =>
+    new TextBlock(`[Summarized: ${count} messages, ~5,000 tokens]\n\nsummary`)
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  function makeContext(messages: Message[], model: MockMessageModel, result: SummarizeResult): ContextState {
+    vi.spyOn(model, 'summarize').mockResolvedValue(result)
+    vi.spyOn(Model.prototype, 'summarize').mockResolvedValue(result)
+    vi.spyOn(model, 'countTokens').mockResolvedValue(5000)
+    const agent = createMockAgent({ messages, extra: { model } as Partial<Agent> })
+    return { messages, agent, utilization: 0.9 }
+  }
+
+  const history = (): Message[] => [
+    text('user', 'u0'),
+    text('assistant', 'a1'),
+    text('user', 'u2'),
+    text('assistant', 'a3'),
+    text('user', 'u4'),
+  ]
+
+  it('places an override compaction block verbatim as its own message with its own role', async () => {
+    const model = new MockMessageModel()
+    const summary = new Message({ role: 'assistant', content: [redacted] })
+    const strategy = Offload.summarize('*', { model }).when({ utilization: 0.5, preserveRecent: 1 })
+    const messages = history()
+    const original = [...messages]
+
+    expect(await strategy.apply(makeContext(messages, model, { summary }))).toBe(true)
+    expect(messages).toEqual([summary, original[4]])
+  })
+
+  it('warns and keeps the history when an override compaction block does not alternate', async () => {
+    const model = new MockMessageModel()
+    const summary = new Message({ role: 'assistant', content: [redacted] })
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    const strategy = Offload.summarize('*', { model }).when({ utilization: 0.5, preserveRecent: 2 })
+    const messages = history()
+    const original = [...messages]
+
+    expect(await strategy.apply(makeContext(messages, model, { summary }))).toBe(false)
+    expect(messages).toEqual(original)
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('summary does not alternate with the kept messages'))
+  })
+
+  it('keeps the summary out of a tool result whose tool use is pinned', async () => {
+    const model = new MockMessageModel()
+    const summary = text('user', 'summary')
+    const strategy = Offload.summarize('*', { model }).when({ utilization: 0.5 })
+    const task = new Message({ role: 'user', content: [new TextBlock('task')], metadata: pinned })
+    const toolUse = new Message({
+      role: 'assistant',
+      content: [new ToolUseBlock({ toolUseId: 't1', name: 'read', input: {} })],
+      metadata: pinned,
+    })
+    const toolResult = makeToolResultMessage('ok', 't1')
+    const messages = [task, toolUse, toolResult, text('assistant', 'a3'), text('user', 'u4')]
+    messages.push(text('assistant', 'a5'), text('user', 'u6'))
+    const context = makeContext(messages, model, { summary })
+
+    expect(await strategy.apply(context)).toBe(true)
+    messages.push(text('assistant', 'a7'), text('user', 'u8'))
+    expect(await strategy.apply(context)).toBe(true)
+
+    expect(messages).toEqual([
+      task,
+      toolUse,
+      toolResult,
+      new Message({ role: 'assistant', content: [marked(3)], trackingId: anyTrackingId }),
+      new Message({ role: 'user', content: [new TextBlock('u8')], trackingId: anyTrackingId }),
+    ])
+    expect(messages[2]!.content).toEqual(makeToolResultMessage('ok', 't1').content)
+  })
+
+  it('appends a leading summary to the kept message so its stash refs still resolve', async () => {
+    const model = new MockMessageModel()
+    const summary = text('user', 'summary')
+    const strategy = Offload.summarize('*', { model }).when({ utilization: 0.5, preserveRecent: 3 })
+    const metadata = { custom: { source: 'upload' } }
+    const big = new Message({ role: 'user', content: [new TextBlock('x'.repeat(10000))], trackingId: 'id2', metadata })
+    const messages = [text('user', 'u0', 'id0'), text('assistant', 'a1', 'id1'), big]
+    messages.push(text('assistant', 'a3', 'id3'), text('user', 'u4', 'id4'))
+    const kept = messages.slice(2)
+
+    expect(await strategy.apply(makeContext(messages, model, { summary }))).toBe(true)
+    expect(messages).toEqual([
+      new Message({ role: 'user', content: [...big.content, marked(2)], trackingId: 'id2', metadata }),
+      ...kept.slice(1),
+    ])
+  })
+
+  it('places a summary between two same-role messages on its own', async () => {
+    const model = new MockMessageModel()
+    const summary = text('user', 'summary')
+    const strategy = Offload.summarize('assistantText', { model }).when({ utilization: 0.5, threshold: 50 })
+    const question = new Message({
+      role: 'user',
+      content: [new TextBlock('q2')],
+      trackingId: 'id2',
+      metadata: { custom: { tag: 'x' } },
+    })
+    const latest = text('user', 'latest', 'id4')
+    const messages = [
+      text('user', 'task'),
+      text('assistant', 'ok'),
+      question,
+      text('assistant', 'a'.repeat(400)),
+      latest,
+    ]
+    const original = [...messages]
+    const context = makeContext(messages, model, { summary })
+    vi.mocked(model.countTokens).mockImplementation(async (counted: Message[]) =>
+      counted.reduce(
+        (total, message) =>
+          total +
+          message.content.reduce((sum, block) => sum + (block instanceof TextBlock ? block.text.length / 4 : 0), 0),
+        0
+      )
+    )
+
+    expect(await strategy.apply(context)).toBe(true)
+    expect(messages.slice(0, 3)).toEqual(original.slice(0, 3))
+    expect(messages[3]!.role).toBe('assistant')
+    expect(messages[4]).toBe(latest)
+    expect(messages).toHaveLength(5)
+  })
+
+  it('sends a prefix that does not alternate through the base summarize', async () => {
+    const model = new MockMessageModel()
+    const summary = text('user', 'summary')
+    const strategy = Offload.summarize('*', { model }).when({ utilization: 0.5, preserveRecent: 3 })
+    const messages = [
+      text('user', 'u0'),
+      text('user', 'u1'),
+      text('assistant', 'a2'),
+      text('user', 'u3'),
+      text('assistant', 'a4'),
+      text('user', 'u5'),
+      text('assistant', 'a6'),
+      text('user', 'u7'),
+    ]
+
+    expect(await strategy.apply(makeContext(messages, model, { summary }))).toBe(true)
+    expect(model.summarize).not.toHaveBeenCalled()
+    expect(Model.prototype.summarize).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not re-summarize a lone earlier summary', async () => {
+    const model = new MockMessageModel()
+    const summary = text('user', 'summary')
+    const strategy = Offload.summarize('assistantText', { model }).when({ utilization: 0.5 })
+    const messages = [text('user', 'u0'), new Message({ role: 'assistant', content: [marked(3)] }), text('user', 'u2')]
+    const original = [...messages]
+
+    expect(await strategy.apply(makeContext(messages, model, { summary }))).toBe(false)
+    expect(messages).toEqual(original)
+    expect(Model.prototype.summarize).not.toHaveBeenCalled()
   })
 })
 

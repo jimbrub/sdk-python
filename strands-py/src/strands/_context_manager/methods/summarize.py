@@ -14,9 +14,12 @@ if TYPE_CHECKING:
     from ...models.model import Model
 
 
+_SUMMARIZED_PREFIX = "[Summarized:"
+
+
 def _format_summarized(description: str, tokens: int, summary: str | None = None) -> str:
     """Format a ``[Summarized: ...]`` marker with an optional summary body."""
-    header = f"[Summarized: {description}, ~{tokens:,} tokens]"
+    header = f"{_SUMMARIZED_PREFIX} {description}, ~{tokens:,} tokens]"
     if summary:
         return f"{header}\n\n{summary}"
     return header

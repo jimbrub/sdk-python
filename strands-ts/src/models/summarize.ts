@@ -15,10 +15,12 @@ import { CitationsBlock } from '../types/citations.js'
 import { MaxTokensError, ModelError } from '../errors.js'
 import type { ToolSpec } from '../tools/types.js'
 import type { ModelStreamEvent, Usage } from './streaming.js'
-import type { Model, StreamAggregatedResult } from './model.js'
+import type { Model, StreamAggregatedResult, StreamOptions } from './model.js'
 
 /**
  * Options for a {@link Model.summarize} call.
+ *
+ * @experimental
  */
 export interface SummarizeOptions {
   /** The live conversation's system prompt, for an override. */
@@ -29,10 +31,15 @@ export interface SummarizeOptions {
 
   /** System prompt for the summarizer, replacing the default one. */
   summarizerSystemPrompt?: string
+
+  /** Signal that aborts the call, for an override and forwarded to the base stream call. */
+  cancelSignal?: AbortSignal
 }
 
 /**
  * Result of a {@link Model.summarize} call.
+ *
+ * @experimental
  */
 export interface SummarizeResult {
   /** The message that replaces the summarized messages. Its content is empty when the model wrote no summary. */
@@ -47,7 +54,7 @@ export interface SummarizeResult {
  *
  * @internal
  */
-export const DEFAULT_SUMMARIZE_INSTRUCTIONS = [
+export const DEFAULT_SUMMARIZER_SYSTEM_PROMPT = [
   'You are a summarization assistant. Produce a concise factual summary that preserves:',
   '- Key data, values, and identifiers',
   '- Important decisions and conclusions',
@@ -66,24 +73,31 @@ export const DEFAULT_SUMMARIZE_INSTRUCTIONS = [
  * @internal
  * @param model - The model to stream from
  * @param messages - The messages to summarize, left unmodified
- * @param options - A custom summarization system prompt; the live system prompt and tools are not sent
+ * @param options - A custom summarization system prompt and a cancellation signal; the live system prompt and
+ *   tools are not sent
  * @returns The summary message and the call's token usage
  */
 export async function summarizeWithStream(
   model: Model,
   messages: Message[],
-  options: SummarizeOptions = {}
+  options: Pick<SummarizeOptions, 'summarizerSystemPrompt' | 'cancelSignal'> = {}
 ): Promise<SummarizeResult> {
   const content = [new TextBlock('<content>'), ...flattenMessagesToContent(messages), new TextBlock('</content>')]
   const request = [new Message({ role: 'user', content })]
-  const systemPrompt = options.summarizerSystemPrompt || DEFAULT_SUMMARIZE_INSTRUCTIONS
-  const { reply, ...usage } = await readSummary(model.streamAggregated(request, { systemPrompt }))
+  const streamOptions: StreamOptions = {
+    systemPrompt: options.summarizerSystemPrompt || DEFAULT_SUMMARIZER_SYSTEM_PROMPT,
+    ...(options.cancelSignal && { cancelSignal: options.cancelSignal }),
+  }
+  const { reply, usage } = await readSummary(model.streamAggregated(request, streamOptions))
   const summary = (reply?.content ?? [])
     .flatMap(blockText)
     .map((text) => text.trim())
     .filter(Boolean)
     .join('\n')
-  return { summary: new Message({ role: 'user', content: summary ? [new TextBlock(summary)] : [] }), ...usage }
+  return {
+    summary: new Message({ role: 'user', content: summary ? [new TextBlock(summary)] : [] }),
+    ...(usage && { usage }),
+  }
 }
 
 /**
@@ -110,17 +124,6 @@ export function flattenMessagesToContent(messages: Message[]): ContentBlock[] {
     blocks.push(new TextBlock(`\n---\n[${message.role}]`), ...content)
   }
   return blocks
-}
-
-/**
- * Converts ToolResultContent[] to ContentBlock[] the summarizer accepts.
- *
- * @internal
- * @param content - The tool result content to convert
- * @returns The converted content blocks
- */
-export function toolResultToContentBlocks(content: ToolResultContent[]): ContentBlock[] {
-  return content.flatMap(toSummarizerBlocks)
 }
 
 /** Reads a {@link Model.streamAggregated} call; `reply` is set only when the reply is complete. */
@@ -153,10 +156,22 @@ async function drain(
 /** Stop reasons that end a complete reply. */
 const COMPLETE_STOP_REASONS: ReadonlySet<StopReason> = new Set(['endTurn', 'stopSequence'])
 
-/** Whether `error` is a reply cut off at the output limit, or stopped on a tool call whose input does not parse. */
+/**
+ * Whether `error` is a reply cut off at the output limit, a stream that ended without completing a message, or a
+ * reply stopped on a tool call whose input does not parse.
+ */
 function writesNoSummary(error: unknown): boolean {
-  return error instanceof MaxTokensError || (error instanceof ModelError && error.cause instanceof SyntaxError)
+  if (error instanceof MaxTokensError) return true
+  if (!(error instanceof ModelError)) return false
+  return error.message === INCOMPLETE_STREAM_MESSAGE || error.cause instanceof SyntaxError
 }
+
+/**
+ * The {@link ModelError} message {@link Model.streamAggregated} throws when a stream ends without a message stop.
+ *
+ * @internal
+ */
+export const INCOMPLETE_STREAM_MESSAGE = 'Stream ended without completing a message'
 
 /** Returns the generated text of a text or citations block. */
 function blockText(block: ContentBlock): string[] {
@@ -173,7 +188,7 @@ function messageToContentBlocks(message: Message, toolNames: Map<string, string>
   const blocks: ContentBlock[] = []
   for (const block of message.content) {
     if (block instanceof ToolResultBlock) {
-      blocks.push(new TextBlock(formatToolResultLabel(block, toolNames)), ...toolResultToContentBlocks(block.content))
+      blocks.push(new TextBlock(formatToolResultLabel(block, toolNames)), ...block.content.flatMap(toSummarizerBlocks))
     } else if (block instanceof ToolUseBlock) {
       blocks.push(new TextBlock(`[tool call: ${block.name}] ${JSON.stringify(block.input)}`))
     } else {

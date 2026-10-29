@@ -1,6 +1,7 @@
 """Base :meth:`Model.summarize` implementation and its result type."""
 
 import json
+import threading
 from collections.abc import AsyncIterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
@@ -14,7 +15,7 @@ if TYPE_CHECKING:
     from .model import Model
 
 # Subject to change based on benchmarking.
-_DEFAULT_SUMMARIZE_INSTRUCTIONS = (
+_DEFAULT_SUMMARIZER_SYSTEM_PROMPT = (
     "You are a summarization assistant. Produce a concise factual summary that preserves:\n"
     "- Key data, values, and identifiers\n"
     "- Important decisions and conclusions\n"
@@ -31,6 +32,8 @@ _DEFAULT_SUMMARIZE_INSTRUCTIONS = (
 class SummarizeResult:
     """Result of a :meth:`Model.summarize` call.
 
+    Experimental: this type is subject to change.
+
     Attributes:
         summary: The message that replaces the summarized messages. Its content is empty when the model wrote
             no summary.
@@ -42,13 +45,20 @@ class SummarizeResult:
 
 
 async def _summarize_with_stream(
-    model: "Model", messages: Messages, *, summarizer_system_prompt: str | None = None
+    model: "Model",
+    messages: Messages,
+    *,
+    summarizer_system_prompt: str | None = None,
+    cancel_signal: threading.Event | None = None,
 ) -> SummarizeResult:
     """Summarize ``messages`` with a tool-less :meth:`Model.stream` call on their delimited, flattened transcript."""
     content = [ContentBlock(text="<content>"), *_flatten_messages_to_content(messages), ContentBlock(text="</content>")]
     request = [Message(role="user", content=content)]
     events = model.stream(
-        request, tool_specs=None, system_prompt=summarizer_system_prompt or _DEFAULT_SUMMARIZE_INSTRUCTIONS
+        request,
+        tool_specs=None,
+        system_prompt=summarizer_system_prompt or _DEFAULT_SUMMARIZER_SYSTEM_PROMPT,
+        cancel_signal=cancel_signal,
     )
     summary, usage = await _read_summary(events)
     summary_content = [ContentBlock(text=summary)] if summary else []
