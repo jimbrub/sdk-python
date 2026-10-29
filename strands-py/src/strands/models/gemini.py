@@ -509,7 +509,15 @@ class GeminiModel(Model):
                         return {"messageStop": {"stopReason": "max_tokens"}}
                     case "SAFETY":
                         return {"messageStop": {"stopReason": "guardrail_intervened"}}
-                    case "RECITATION":
+                    case (
+                        "RECITATION"
+                        | "BLOCKLIST"
+                        | "PROHIBITED_CONTENT"
+                        | "SPII"
+                        | "IMAGE_SAFETY"
+                        | "IMAGE_PROHIBITED_CONTENT"
+                        | "IMAGE_RECITATION"
+                    ):
                         return {"messageStop": {"stopReason": "content_filtered"}}
                     case _:
                         return {"messageStop": {"stopReason": "end_turn"}}
