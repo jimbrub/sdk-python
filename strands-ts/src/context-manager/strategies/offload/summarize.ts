@@ -53,9 +53,8 @@ export function compactionSplitIndex(messages: Message[], preservedMessages: num
 function recencySplit(messages: Message[], preservedMessages: number): number {
   const split = compactionSplitIndex(messages, preservedMessages)
   const last = messages.length - 1
-  const pinnedLast = split > 0 && split === last && messages[split]!.role === 'user' && isPinned(messages, split)
-  if (!pinnedLast) return split
-  // Placed behind a pinned last message, the summary would end the history, so one message stays.
+  if (!(split > 0 && split === last)) return split
+  // Placed on the last message, the summary would end the history, so one message stays.
   return split - (splitsToolPair(messages, split - 1) ? 2 : 1)
 }
 
