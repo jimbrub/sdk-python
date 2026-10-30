@@ -96,19 +96,32 @@ def _summary_plan(messages: Messages, indices: list[int]) -> tuple[list[int], tu
     return kept, (slot_run[0], role)
 
 
-def _plan_after_message_zero(messages: Messages, indices: list[int]) -> tuple[list[int], tuple[int, Role]] | None:
-    """Return ``_summary_plan`` for ``indices``, or, when it finds no slot, for ``indices`` without message 0.
+def _plan_after_message_zero(
+    messages: Messages, indices: list[int], compacts: bool
+) -> tuple[list[int], tuple[int, Role]] | None:
+    """Return ``_summary_plan`` for ``indices``, or for ``indices`` without message 0 when that plan cannot take it.
 
-    Kept, message 0 lets the summary follow it, which fits when the only slot at the start of the history lies
-    before a pinned message of the summary's role. A tool result paired with message 0 is kept with it. None when
-    neither finds a slot, or when the plan would summarize only an earlier summary.
+    Only a server-side compaction of the conversation's start takes message 0: a plan for a model that ``compacts``
+    and that is ``_is_compaction_prefix``. Any other summary keeps it verbatim, and a summary that finds no slot
+    otherwise can follow it, before a pinned message of the summary's role. A tool result paired with message 0 is
+    kept with it. None when no plan finds a slot, when one message is left after message 0, or when the plan would
+    summarize only an earlier summary.
     """
-    plan = _summary_plan(messages, indices)
-    if plan is None and indices and indices[0] == 0:
+    starts_at_zero = indices[:1] == [0]
+    plan = _summary_plan(messages, indices) if compacts or not starts_at_zero else None
+    takes_message_zero = compacts and plan is not None and _is_compaction_prefix(messages, plan[0])
+    if starts_at_zero and not takes_message_zero:
         kept_head = 2 if len(messages) > 1 and _splits_tool_pair(messages, 1) else 1
         rest = [index for index in indices if index >= kept_head]
-        plan = _summary_plan(messages, rest) if rest else None
+        # After a pass behind a pinned message, the one message left after message 0 holds that pass's summary.
+        plan = _summary_plan(messages, rest) if len(rest) > 1 else None
     return None if plan is None or _is_lone_summary(messages, plan[0]) else plan
+
+
+def _is_compaction_prefix(messages: Messages, indices: list[int]) -> bool:
+    """Whether ``indices`` is the conversation's start, opening with a user turn and alternating."""
+    selected = [messages[index] for index in indices]
+    return indices == list(range(len(indices))) and messages[0]["role"] == "user" and _alternates(selected)
 
 
 def _runs(indices: list[int]) -> list[list[int]]:
@@ -193,8 +206,8 @@ def _place_summary(messages: Messages, indices: list[int], slot: tuple[int, Role
 
     A summary holding other content, such as an override's provider-native compaction block, is placed verbatim:
     its own message with its own role, never joined with another. It fits only between kept neighbors of the other
-    role, and opens the history only as a user message, so it must take the role of the last message it summarizes
-    when the kept messages alternate. When it does not fit, ``messages`` is left unchanged.
+    role, so it must take the role of the last message it summarizes when the kept messages alternate; the provider
+    that returned it decides whether it may open the history. When it does not fit, ``messages`` is left unchanged.
 
     Returns:
         Whether the summary was placed.
@@ -222,13 +235,9 @@ def _is_text(summary: Message) -> bool:
 
 
 def _alternates_at(messages: Messages, position: int, role: Role) -> bool:
-    """Whether a message of ``role`` inserted at ``position`` differs in role from both its neighbors.
-
-    The history opens with a user message, so at position 0 the message has an assistant neighbor before it.
-    """
-    before = messages[position - 1]["role"] if position > 0 else "assistant"
-    after = [messages[position]["role"]] if position < len(messages) else []
-    return role not in (before, *after)
+    """Whether a message of ``role`` inserted at ``position`` differs in role from both its neighbors."""
+    neighbors = messages[max(position - 1, 0) : position + 1]
+    return all(neighbor["role"] != role for neighbor in neighbors)
 
 
 def _join_or_insert(messages: Messages, position: int, role: Role, summary: Message) -> None:
@@ -349,20 +358,19 @@ class SummarizeStrategy(BaseOffloadStrategy):
             return False
         return await super().apply(context)
 
-    async def _select(self, context: ContextState, model: Model) -> list[int]:
+    async def _select(self, context: ContextState) -> list[int]:
         """Return the indices of the messages this pass summarizes, in history order, leaving out pinned ones.
 
-        A recency-only pass takes the messages before the compaction cut, keeping message 0 verbatim unless
-        ``model`` overrides ``Model.summarize()`` for a server-side compaction of the conversation's start; a target
-        or threshold pass takes the eligible messages and their tool pairs.
+        A recency-only pass takes the messages before the compaction cut, message 0 included, which planning keeps
+        unless a server-side compaction replaces it; a target or threshold pass takes the eligible messages and their
+        tool pairs.
         """
         messages = context.messages
         if self._target not in (None, "*") or self._threshold is not None:
             indices = _with_tool_pairs(messages, await self._get_eligible_messages(context))
             return [] if _is_lone_summary(messages, indices) else indices
         split = _recency_split(messages, self._preserve_recent)
-        first = 0 if _overrides_summarize(model) else 1
-        selected = [index for index in range(first, split) if not is_pinned(messages, index)]
+        selected = [index for index in range(split) if not is_pinned(messages, index)]
         # After a pass behind a pinned message, the only unpinned message before the cut is that pass's summary.
         return selected if len(selected) > 1 else []
 
@@ -371,25 +379,21 @@ class SummarizeStrategy(BaseOffloadStrategy):
         model = self._resolve_model(context.agent)
         if not model:
             return False
-        indices = await self._select(context, model)
+        indices = await self._select(context)
         if not indices:
             return False
         messages = context.messages
-        plan = _plan_after_message_zero(messages, indices)
+        plan = _plan_after_message_zero(messages, indices, _overrides_summarize(model))
         if plan is None:
-            logger.debug(
-                "summarized=<%s> | no place outside pinned messages for a summary that frees context", len(indices)
-            )
+            logger.debug("summarized=<%s> | no place for a summary that frees context", len(indices))
             return False
         indices, slot = plan
         agent = context.agent
         selected = [messages[index] for index in indices]
 
-        # Server-side compaction replaces the start of the conversation, so a provider override only gets the
-        # conversation's first messages, opening with a user turn and alternating; any other selection gets the base
-        # summary.
-        prefix = indices == list(range(len(indices))) and messages[0]["role"] == "user" and _alternates(selected)
-        summarize = model.summarize if prefix else functools.partial(Model.summarize, model)
+        # Planning leaves message 0 in only for a provider override's server-side compaction of the conversation's
+        # start; any other selection gets the base summary.
+        summarize = model.summarize if indices[0] == 0 else functools.partial(Model.summarize, model)
         result = await summarize(
             selected,
             # A server-side compaction must carry the live system prompt and tools, or the provider

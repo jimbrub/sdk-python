@@ -452,6 +452,8 @@ export abstract class Model<T extends BaseModelConfig = BaseModelConfig> {
    * Providers with server-side compaction override this method. An override is called only for the conversation's
    * opening messages: a non-empty prefix that starts with a user message, alternates roles, and keeps every
    * `toolUse` with its `toolResult`. It falls back to `super.summarize()` when native compaction is unavailable.
+   * Every other summary keeps message 0 verbatim; an override's prefix includes message 0, so a fallback's summary
+   * replaces it.
    *
    * @experimental
    * @param messages - The messages to summarize, left unmodified

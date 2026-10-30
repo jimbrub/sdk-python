@@ -390,6 +390,28 @@ describe('base summarize', () => {
     expect((messages[1]!.content[1] as TextBlock).text).toMatch(/^\[Summarized: 2 messages,/)
     expect(messages[2]!.content).toEqual([new TextBlock('u4')])
   })
+
+  it('skips the pass when one message is left after message 0', async () => {
+    // The message left after message 0 opens with an earlier pass's summary, so re-summarizing it frees nothing.
+    const summarizer = new MockMessageModel().addTurn({ type: 'textBlock', text: 'summary' })
+    const strategy = Offload.summarize('*', { model: summarizer }).when({ utilization: 0.5, preserveRecent: 2 })
+    const text = (role: 'user' | 'assistant', value: string): Message =>
+      new Message({ role, content: [new TextBlock(value)] })
+    const pinned = new Message({
+      role: 'assistant',
+      content: [new TextBlock('a1')],
+      metadata: { custom: { pinned: true } },
+    })
+    const carrier = new Message({
+      role: 'user',
+      content: [new TextBlock('[Summarized: 3 messages, ~5,000 tokens]\n\nsummary'), new TextBlock('u2')],
+    })
+    const messages = [text('user', 'task'), pinned, carrier, text('assistant', 'a3'), text('user', 'u4')]
+    const original = [...messages]
+
+    expect(await strategy.apply(makeContext(messages, 0.9))).toBe(false)
+    expect(messages).toEqual(original)
+  })
 })
 
 describe('routing through Model.summarize', () => {
@@ -596,10 +618,10 @@ describe('routing through Model.summarize', () => {
     const original = [...messages]
 
     expect(await strategy.apply(makeRoutingContext(messages, 0.9, model))).toBe(true)
-    expect(received).toEqual([original.slice(0, 4)])
+    expect(received).toEqual([original.slice(1, 4)])
     expect(model.summarize).not.toHaveBeenCalled()
     expect(vi.mocked(Model.prototype.summarize).mock.contexts).toEqual([model])
-    expect(messages).toEqual([markedSummary(4), ...original.slice(4)])
+    expect(messages).toEqual([original[0], markedSummary(3), ...original.slice(4)])
   })
 
   it('skips a pass whose only summary would join the last message', async () => {
@@ -844,12 +866,13 @@ describe('routing through Model.summarize', () => {
     const original = [...messages]
 
     expect(await strategy.apply(makeRoutingContext(messages, 0.9, model))).toBe(true)
-    expect(received).toEqual([[original[0], original[1], original[3], original[4]]])
+    expect(received).toEqual([[original[1], original[3], original[4]]])
     expect(model.summarize).not.toHaveBeenCalled()
     expect(messages).toEqual([
+      original[0],
+      new Message({ role: 'assistant', content: [marked(3)], trackingId: anyTrackingId }),
       pinned,
-      new Message({ role: 'assistant', content: [new TextBlock('c'), marked(4)], trackingId: original[5]!.trackingId }),
-      original[6],
+      ...original.slice(5),
     ])
   })
 
@@ -1015,25 +1038,13 @@ describe('summary placement', () => {
 
   it('places an override compaction block verbatim as its own message with its own role', async () => {
     const model = new MockMessageModel()
-    const summary = new Message({ role: 'user', content: [redacted] })
-    const strategy = Offload.summarize('*', { model }).when({ utilization: 0.5, preserveRecent: 2 })
-    const messages = history()
-    const original = [...messages]
-
-    expect(await strategy.apply(makeContext(messages, model, { summary }))).toBe(true)
-    expect(messages).toEqual([summary, ...original.slice(3)])
-  })
-
-  it('keeps the history when an override compaction block would open it as an assistant message', async () => {
-    const model = new MockMessageModel()
     const summary = new Message({ role: 'assistant', content: [redacted] })
-    vi.spyOn(logger, 'warn').mockImplementation(() => {})
     const strategy = Offload.summarize('*', { model }).when({ utilization: 0.5, preserveRecent: 3 })
     const messages = history()
     const original = [...messages]
 
-    expect(await strategy.apply(makeContext(messages, model, { summary }))).toBe(false)
-    expect(messages).toEqual(original)
+    expect(await strategy.apply(makeContext(messages, model, { summary }))).toBe(true)
+    expect(messages).toEqual([summary, ...original.slice(2)])
   })
 
   it('warns and keeps the history when an override compaction block does not alternate', async () => {

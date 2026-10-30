@@ -97,23 +97,35 @@ function summaryPlan(messages: Message[], indices: number[]): { indices: number[
 }
 
 /**
- * Returns `summaryPlan` for `indices`, or, when it finds no slot, for `indices` without message 0.
+ * Returns `summaryPlan` for `indices`, or for `indices` without message 0 when that plan cannot take it.
  *
- * Kept, message 0 lets the summary follow it, which fits when the only slot at the start of the history lies
- * before a pinned message of the summary's role. A tool result paired with message 0 is kept with it. Undefined
- * when neither finds a slot, or when the plan would summarize only an earlier summary.
+ * Only a server-side compaction of the conversation's start takes message 0: a plan for a model that `compacts` and
+ * that is {@link isCompactionPrefix}. Any other summary keeps it verbatim, and a summary that finds no slot otherwise
+ * can follow it, before a pinned message of the summary's role. A tool result paired with message 0 is kept with it.
+ * Undefined when no plan finds a slot, when one message is left after message 0, or when the plan would summarize
+ * only an earlier summary.
  */
 function planAfterMessageZero(
   messages: Message[],
-  indices: number[]
+  indices: number[],
+  compacts: boolean
 ): { indices: number[]; slot: SummarySlot } | undefined {
-  let plan = summaryPlan(messages, indices)
-  if (!plan && indices[0] === 0) {
+  const startsAtZero = indices[0] === 0
+  let plan = compacts || !startsAtZero ? summaryPlan(messages, indices) : undefined
+  const takesMessageZero = compacts && plan !== undefined && isCompactionPrefix(messages, plan.indices)
+  if (startsAtZero && !takesMessageZero) {
     const keptHead = messages.length > 1 && splitsToolPair(messages, 1) ? 2 : 1
     const rest = indices.filter((index) => index >= keptHead)
-    plan = rest.length > 0 ? summaryPlan(messages, rest) : undefined
+    // After a pass behind a pinned message, the one message left after message 0 holds that pass's summary.
+    plan = rest.length > 1 ? summaryPlan(messages, rest) : undefined
   }
   return plan && !isLoneSummary(messages, plan.indices) ? plan : undefined
+}
+
+/** Whether `indices` is the conversation's start, opening with a user turn and alternating. */
+function isCompactionPrefix(messages: Message[], indices: number[]): boolean {
+  const selected = indices.map((index) => messages[index]!)
+  return indices.every((index, position) => index === position) && messages[0]!.role === 'user' && alternates(selected)
 }
 
 /** Splits sorted `indices` into runs of consecutive indices. */
@@ -196,8 +208,8 @@ function lockedRoles(messages: Message[], start: number, end: number): Set<Role>
  *
  * A summary holding other content, such as an override's provider-native compaction block, is placed verbatim:
  * its own message with its own role, never joined with another. It fits only between kept neighbors of the other
- * role, and opens the history only as a user message, so it must take the role of the last message it summarizes
- * when the kept messages alternate. When it does not fit, `messages` is left unchanged.
+ * role, so it must take the role of the last message it summarizes when the kept messages alternate; the provider
+ * that returned it decides whether it may open the history. When it does not fit, `messages` is left unchanged.
  *
  * @returns Whether the summary was placed
  */
@@ -218,14 +230,9 @@ function isText(summary: Message): boolean {
   return summary.content.every((block) => block instanceof TextBlock)
 }
 
-/**
- * Whether a message of `role` inserted at `position` differs in role from both its neighbors.
- *
- * The history opens with a user message, so at position 0 the message has an assistant neighbor before it.
- */
+/** Whether a message of `role` inserted at `position` differs in role from both its neighbors. */
 function alternatesAt(messages: Message[], position: number, role: Role): boolean {
-  const before = position > 0 ? messages[position - 1]!.role : 'assistant'
-  return role !== before && messages[position]?.role !== role
+  return messages.slice(Math.max(position - 1, 0), position + 1).every((neighbor) => neighbor.role !== role)
 }
 
 /**
@@ -332,11 +339,11 @@ export class SummarizeStrategy extends BaseOffloadStrategy {
   /**
    * Returns the indices of the messages this pass summarizes, in history order, leaving out pinned ones.
    *
-   * A recency-only pass takes the messages before the compaction cut, keeping message 0 verbatim unless `model`
-   * overrides `Model.summarize()` for a server-side compaction of the conversation's start; a target or threshold
-   * pass takes the eligible messages and their tool pairs.
+   * A recency-only pass takes the messages before the compaction cut, message 0 included, which planning keeps
+   * unless a server-side compaction replaces it; a target or threshold pass takes the eligible messages and their
+   * tool pairs.
    */
-  private async _select(context: ContextState, model: Model): Promise<number[]> {
+  private async _select(context: ContextState): Promise<number[]> {
     const { messages } = context
     const recencyOnly = (this._target === undefined || this._target === '*') && this._threshold === undefined
     if (!recencyOnly) {
@@ -344,10 +351,8 @@ export class SummarizeStrategy extends BaseOffloadStrategy {
       return isLoneSummary(messages, indices) ? [] : indices
     }
     const split = recencySplit(messages, this._preserveRecent)
-    const first = overridesSummarize(model) ? 0 : 1
-    const selected = Array.from({ length: Math.max(split - first, 0) }, (_, index) => first + index).filter(
-      (index) => !isPinned(messages, index)
-    )
+    const selected: number[] = []
+    for (let index = 0; index < split; index++) if (!isPinned(messages, index)) selected.push(index)
     // After a pass behind a pinned message, the only unpinned message before the cut is that pass's summary.
     return selected.length > 1 ? selected : []
   }
@@ -356,28 +361,24 @@ export class SummarizeStrategy extends BaseOffloadStrategy {
   protected override async _applyPerMessage(context: ContextState): Promise<boolean> {
     const model = this._resolveModel(context.agent)
     if (!model) return false
-    const selected = await this._select(context, model)
+    const selected = await this._select(context)
     if (selected.length === 0) return false
     const { messages, agent } = context
-    const plan = planAfterMessageZero(messages, selected)
+    const plan = planAfterMessageZero(messages, selected, overridesSummarize(model))
     if (!plan) {
-      logger.debug(
-        `summarized=<${selected.length}> | no place outside pinned messages for a summary that frees context`
-      )
+      logger.debug(`summarized=<${selected.length}> | no place for a summary that frees context`)
       return false
     }
     const { indices, slot } = plan
 
     const summarized = indices.map((index) => messages[index]!)
     const options = this._summarizeOptions(agent)
-    // Server-side compaction replaces the start of the conversation, so a provider override only gets the
-    // conversation's first messages, opening with a user turn and alternating; any other selection gets the base
-    // summary.
-    const prefix =
-      indices.every((index, position) => index === position) && messages[0]!.role === 'user' && alternates(summarized)
-    const result = prefix
-      ? await model.summarize(summarized, options)
-      : await Model.prototype.summarize.call(model, summarized, options)
+    // Planning leaves message 0 in only for a provider override's server-side compaction of the conversation's
+    // start; any other selection gets the base summary.
+    const result =
+      indices[0] === 0
+        ? await model.summarize(summarized, options)
+        : await Model.prototype.summarize.call(model, summarized, options)
     recordSummaryUsage(context.invocationContext, result)
     if (result.summary.content.length === 0) {
       logger.warn(`summarized=<${indices.length}> | model summarize returned no summary | leaving history unchanged`)
