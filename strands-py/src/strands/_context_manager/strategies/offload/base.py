@@ -258,16 +258,21 @@ def _repair_alternation(messages: Messages) -> None:
 def _merge_messages(prev: Message, current: Message) -> Message:
     """Return ``prev`` with ``current``'s content appended, losing neither message's tracking id or metadata.
 
-    The merge keeps ``prev``'s tracking id and metadata, and is pinned when either message is. ``current``'s tracking
-    id and metadata are recorded under ``metadata.custom.merged_messages`` with the offset its content starts at, so
-    stash refs to its blocks still resolve.
+    The merge keeps ``prev``'s tracking id, or ``current``'s when ``prev`` has none, and ``prev``'s metadata, and is
+    pinned when either message is. ``current``'s tracking id and metadata are recorded under
+    ``metadata.custom.merged_messages`` with the offset its content starts at, so stash refs to its blocks still
+    resolve.
     """
     offset = len(prev["content"])
     merged = Message(role=prev["role"], content=[*prev["content"], *current["content"]])
-    if "tracking_id" in prev:
-        merged["tracking_id"] = prev["tracking_id"]
     metadata: MessageMetadata = {**prev.get("metadata", {})}
     custom = {**metadata.get("custom", {})}
+    if "tracking_id" in prev:
+        merged["tracking_id"] = prev["tracking_id"]
+    elif "tracking_id" in current:
+        merged["tracking_id"] = current["tracking_id"]
+        # An origin without a tracking id keeps refs to prev's blocks on the keys they were stashed under.
+        custom.setdefault(MERGED_MESSAGES_KEY, [{"offset": 0, "metadata": {}}])
     current_metadata, current_merged = _split_merged(current)
     origin: dict[str, object] = {"offset": offset, "metadata": current_metadata}
     if "tracking_id" in current:

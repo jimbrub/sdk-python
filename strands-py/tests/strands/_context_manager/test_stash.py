@@ -512,3 +512,19 @@ class TestStashRefsAfterMerge:
         await stash.store_message(messages[0])
 
         assert sorted(await stash.list()) == ["c_0", "p_0"]
+
+    @pytest.mark.asyncio
+    async def test_keeps_the_later_tracking_id_and_both_messages_refs_when_the_earlier_has_none(self, stash):
+        prev = Message(role="user", content=[ContentBlock(text="a")])
+        current = Message(role="user", content=[ContentBlock(text="b")], tracking_id="c")
+        for message in (prev, current):
+            await stash.store_message(message)
+        messages = [prev, current]
+
+        _repair_alternation(messages)
+
+        merged = messages[0]
+        assert merged["tracking_id"] == "c"
+        refs = [stash.refs_for(block, merged, index) for index, block in enumerate(merged["content"])]
+        assert refs == [["unknown_0"], ["c_0"]]
+        assert [await stash.retrieve(ref) for [ref] in refs] == [{"text": "a"}, {"text": "b"}]
