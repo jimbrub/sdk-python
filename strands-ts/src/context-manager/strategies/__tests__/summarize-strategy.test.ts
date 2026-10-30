@@ -391,7 +391,7 @@ describe('base summarize', () => {
     expect(messages[2]!.content).toEqual([new TextBlock('u4')])
   })
 
-  it('skips the pass when one message is left after message 0', async () => {
+  it('skips the pass when the one message left after message 0 holds a summary', async () => {
     // The message left after message 0 opens with an earlier pass's summary, so re-summarizing it frees nothing.
     const summarizer = new MockMessageModel().addTurn({ type: 'textBlock', text: 'summary' })
     const strategy = Offload.summarize('*', { model: summarizer }).when({ utilization: 0.5, preserveRecent: 2 })
@@ -411,6 +411,23 @@ describe('base summarize', () => {
 
     expect(await strategy.apply(makeContext(messages, 0.9))).toBe(false)
     expect(messages).toEqual(original)
+  })
+
+  it('summarizes the one message left after message 0', async () => {
+    // A large message right after the task is summarized alone; only an earlier summary is not.
+    const summarizer = new MockMessageModel().addTurn({ type: 'textBlock', text: 'summary' })
+    const strategy = Offload.summarize('*', { model: summarizer }).when({ utilization: 0.5, preserveRecent: 3 })
+    const text = (role: 'user' | 'assistant', value: string): Message =>
+      new Message({ role, content: [new TextBlock(value)] })
+    const messages = [text('user', 'task'), text('assistant', 'x'.repeat(20000)), text('user', 'u2')]
+    messages.push(text('assistant', 'a3'), text('user', 'u4'))
+    const original = [...messages]
+
+    expect(await strategy.apply(makeContext(messages, 0.9))).toBe(true)
+    expect(messages[0]).toBe(original[0])
+    expect(messages[1]!.role).toBe('assistant')
+    expect((messages[1]!.content[0] as TextBlock).text).toMatch(/^\[Summarized: 1 messages,/)
+    expect(messages.slice(2)).toEqual(original.slice(2))
   })
 })
 

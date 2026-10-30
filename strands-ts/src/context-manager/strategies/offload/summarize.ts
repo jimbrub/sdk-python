@@ -102,8 +102,8 @@ function summaryPlan(messages: Message[], indices: number[]): { indices: number[
  * Only a server-side compaction of the conversation's start takes message 0: a plan for a model that `compacts` and
  * that is {@link isCompactionPrefix}. Any other summary keeps it verbatim, and a summary that finds no slot otherwise
  * can follow it, before a pinned message of the summary's role. A tool result paired with message 0 is kept with it.
- * Undefined when no plan finds a slot, when one message is left after message 0, or when the plan would summarize
- * only an earlier summary.
+ * Undefined when no plan finds a slot, when the one message left after message 0 holds an earlier summary, or when
+ * the plan would summarize only an earlier summary.
  */
 function planAfterMessageZero(
   messages: Message[],
@@ -117,7 +117,8 @@ function planAfterMessageZero(
     const keptHead = messages.length > 1 && splitsToolPair(messages, 1) ? 2 : 1
     const rest = indices.filter((index) => index >= keptHead)
     // After a pass behind a pinned message, the one message left after message 0 holds that pass's summary.
-    plan = rest.length > 1 ? summaryPlan(messages, rest) : undefined
+    const loneSummary = rest.length === 1 && holdsSummary(messages[rest[0]!]!)
+    plan = rest.length === 0 || loneSummary ? undefined : summaryPlan(messages, rest)
   }
   return plan && !isLoneSummary(messages, plan.indices) ? plan : undefined
 }
@@ -182,6 +183,11 @@ function alternates(messages: Message[]): boolean {
 /** Whether `message` holds only `[Summarized: ...]` markers. */
 function isSummary(message: Message): boolean {
   return message.content.every((block) => block instanceof TextBlock && block.text.startsWith(SUMMARIZED_PREFIX))
+}
+
+/** Whether `message` holds a `[Summarized: ...]` marker, alone or joined to its own content. */
+function holdsSummary(message: Message): boolean {
+  return message.content.some((block) => block instanceof TextBlock && block.text.startsWith(SUMMARIZED_PREFIX))
 }
 
 /** Whether `indices` is one earlier summary, which re-summarizing frees nothing from. */

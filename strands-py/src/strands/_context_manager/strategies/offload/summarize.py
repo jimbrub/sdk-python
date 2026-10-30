@@ -104,8 +104,8 @@ def _plan_after_message_zero(
     Only a server-side compaction of the conversation's start takes message 0: a plan for a model that ``compacts``
     and that is ``_is_compaction_prefix``. Any other summary keeps it verbatim, and a summary that finds no slot
     otherwise can follow it, before a pinned message of the summary's role. A tool result paired with message 0 is
-    kept with it. None when no plan finds a slot, when one message is left after message 0, or when the plan would
-    summarize only an earlier summary.
+    kept with it. None when no plan finds a slot, when the one message left after message 0 holds an earlier
+    summary, or when the plan would summarize only an earlier summary.
     """
     starts_at_zero = indices[:1] == [0]
     plan = _summary_plan(messages, indices) if compacts or not starts_at_zero else None
@@ -114,7 +114,8 @@ def _plan_after_message_zero(
         kept_head = 2 if len(messages) > 1 and _splits_tool_pair(messages, 1) else 1
         rest = [index for index in indices if index >= kept_head]
         # After a pass behind a pinned message, the one message left after message 0 holds that pass's summary.
-        plan = _summary_plan(messages, rest) if len(rest) > 1 else None
+        lone_summary = len(rest) == 1 and _holds_summary(messages[rest[0]])
+        plan = None if not rest or lone_summary else _summary_plan(messages, rest)
     return None if plan is None or _is_lone_summary(messages, plan[0]) else plan
 
 
@@ -164,6 +165,11 @@ def _alternates(messages: Messages) -> bool:
 def _is_summary(message: Message) -> bool:
     """Whether ``message`` holds only ``[Summarized: ...]`` markers."""
     return all(block.get("text", "").startswith(_SUMMARIZED_PREFIX) for block in message["content"])
+
+
+def _holds_summary(message: Message) -> bool:
+    """Whether ``message`` holds a ``[Summarized: ...]`` marker, alone or joined to its own content."""
+    return any(block.get("text", "").startswith(_SUMMARIZED_PREFIX) for block in message["content"])
 
 
 def _is_lone_summary(messages: Messages, indices: list[int]) -> bool:

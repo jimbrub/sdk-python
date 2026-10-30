@@ -602,7 +602,7 @@ class TestBaseSummarizeKeepsMessageZeroVerbatim:
         assert messages[2] == _text("user", "u4")
 
     @pytest.mark.asyncio
-    async def test_skips_the_pass_when_one_message_is_left_after_message_zero(self, base_model_agent):
+    async def test_skips_the_pass_when_the_one_message_left_after_message_zero_holds_a_summary(self, base_model_agent):
         # The message left after message 0 opens with an earlier pass's summary, so re-summarizing it frees nothing.
         strategy = Offload.summarize("*").when(utilization=0.5, preserve_recent=2)
         pinned = Message(role="assistant", content=[ContentBlock(text="a1")], metadata=PINNED)
@@ -612,6 +612,19 @@ class TestBaseSummarizeKeepsMessageZeroVerbatim:
 
         assert await strategy.apply(ContextState(messages=messages, agent=base_model_agent, utilization=0.9)) is False
         assert messages == original
+
+    @pytest.mark.asyncio
+    async def test_summarizes_the_one_message_left_after_message_zero(self, base_model_agent):
+        # A large message right after the task is summarized alone; only an earlier summary is not.
+        strategy = Offload.summarize("*").when(utilization=0.5, preserve_recent=3)
+        messages: Messages = [_text("user", "task"), _text("assistant", "x" * 20000), _text("user", "u2")]
+        messages += [_text("assistant", "a3"), _text("user", "u4")]
+
+        assert await strategy.apply(ContextState(messages=messages, agent=base_model_agent, utilization=0.9)) is True
+        assert messages[0] == _text("user", "task")
+        assert messages[1]["role"] == "assistant"
+        assert messages[1]["content"][0]["text"].startswith("[Summarized: 1 messages,")
+        assert messages[2:] == [_text("user", "u2"), _text("assistant", "a3"), _text("user", "u4")]
 
 
 class TestSummarizationWithToolCalls:
