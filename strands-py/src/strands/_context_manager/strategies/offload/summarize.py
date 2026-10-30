@@ -188,14 +188,13 @@ def _locked_roles(messages: Messages, start: int, end: int) -> set[Role]:
 def _place_summary(messages: Messages, indices: list[int], slot: tuple[int, Role], summary: Message) -> bool:
     """Replace the messages at ``indices`` with ``summary`` at ``slot``, or leave ``messages`` unchanged.
 
-    A text summary takes the slot's role. When a kept neighbor has that role, the summary is appended to it,
-    after its content, which keeps that message's tracking id, metadata and block indices for stash refs; otherwise
-    it stands alone.
+    A text summary takes the slot's role. When a kept neighbor has that role, the summary joins it, keeping that
+    message's tracking id and metadata, and stash refs to its blocks resolve; otherwise it stands alone.
 
     A summary holding other content, such as an override's provider-native compaction block, is placed verbatim:
     its own message with its own role, never joined with another. It fits only between kept neighbors of the other
-    role, so it must take the role of the last message it summarizes when the kept messages alternate. When it does
-    not fit, ``messages`` is left unchanged.
+    role, and opens the history only as a user message, so it must take the role of the last message it summarizes
+    when the kept messages alternate. When it does not fit, ``messages`` is left unchanged.
 
     Returns:
         Whether the summary was placed.
@@ -223,16 +222,21 @@ def _is_text(summary: Message) -> bool:
 
 
 def _alternates_at(messages: Messages, position: int, role: Role) -> bool:
-    """Whether a message of ``role`` inserted at ``position`` differs in role from both its neighbors."""
-    neighbors = messages[max(position - 1, 0) : position + 1]
-    return all(neighbor["role"] != role for neighbor in neighbors)
+    """Whether a message of ``role`` inserted at ``position`` differs in role from both its neighbors.
+
+    The history opens with a user message, so at position 0 the message has an assistant neighbor before it.
+    """
+    before = messages[position - 1]["role"] if position > 0 else "assistant"
+    after = [messages[position]["role"]] if position < len(messages) else []
+    return role not in (before, *after)
 
 
 def _join_or_insert(messages: Messages, position: int, role: Role, summary: Message) -> None:
     """Join ``summary``'s content to the kept neighbor of ``role`` at ``position``, or insert it there alone.
 
-    The summary covers the history before ``position``, so it ends the neighbor before it or opens the one after it.
-    The neighbor after it opens with no tool result: that result's tool use would be in the summarized run.
+    The summary covers the history before ``position``, so it ends the neighbor before it and opens a user message
+    after it. An assistant message after it gets the summary at its end, so a leading reasoning block stays first; a
+    user message opening with a tool result does too, since tool results come first.
     """
     carrier = _carrier(messages, position, role)
     if carrier is None:
@@ -240,7 +244,7 @@ def _join_or_insert(messages: Messages, position: int, role: Role, summary: Mess
         _ensure_tracking_id(placed)
         messages.insert(position, placed)
         return
-    if carrier == position:
+    if carrier == position and role == "user" and not _opens_with_tool_result(messages[carrier]):
         messages[carrier] = _prepend_content(Message(role=role, content=list(summary["content"])), messages[carrier])
         return
     joined = messages[carrier].copy()
@@ -277,6 +281,11 @@ def _carrier(messages: Messages, position: int, role: Role) -> int | None:
 def _overrides_summarize(model: Model) -> bool:
     """Whether ``model`` replaces the base ``Model.summarize()``, as a server-side compaction does."""
     return getattr(model.summarize, "__func__", None) is not Model.summarize
+
+
+def _opens_with_tool_result(message: Message) -> bool:
+    """Whether ``message``'s first block is a tool result."""
+    return bool(message["content"]) and is_tool_result_block(message["content"][0])
 
 
 def _record_summary_usage(invocation_context: InvocationContext | None, result: SummarizeResult) -> None:

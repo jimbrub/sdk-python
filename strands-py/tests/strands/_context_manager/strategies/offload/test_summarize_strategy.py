@@ -353,7 +353,7 @@ class TestSummarizeStrategyMessageLevel:
         exp_request = [_text("assistant", "old1"), _text("user", "old2")]
         routing_agent.model.summarize.assert_not_called()
         assert base_summarize.call_args.args == (routing_agent.model, exp_request)
-        exp_carrier = _opened_by_summary("assistant", "old3", 2)
+        exp_carrier = {"role": "assistant", "content": [{"text": "old3"}, _marked(2)]}
         assert messages == [task, exp_carrier, _text("user", "recent")]
 
     @pytest.mark.asyncio
@@ -446,7 +446,7 @@ class TestSummarizeStrategyMessageLevel:
             task,
             ack,
             note,
-            _opened_by_summary("assistant", "a7", 4),
+            {"role": "assistant", "content": [{"text": "a7"}, _marked(4)]},
             _text("user", "u8"),
         ]
 
@@ -515,7 +515,7 @@ class TestSummarizeStrategyMessageLevel:
         assert base_summarize.call_args.args == (routing_agent.model, exp_request)
         exp_messages = [
             original[2],
-            _opened_by_summary("assistant", "c", 4),
+            {"role": "assistant", "content": [{"text": "c"}, _marked(4)]},
             original[6],
         ]
         assert messages == exp_messages
@@ -897,7 +897,7 @@ class TestSummarizeStrategyRouting:
         assert base_summarize.call_args.args == (routing_agent.model, exp_request)
         exp_messages = [
             original[0],
-            _opened_by_summary("assistant", "a", 4),
+            {"role": "assistant", "content": [{"text": "a"}, _marked(4)]},
             original[4],
             original[7],
             original[8],
@@ -920,16 +920,6 @@ class TestSummarizeStrategyRouting:
 
 def _text(role, text):
     return {"role": role, "content": [{"text": text}]}
-
-
-def _opened_by_summary(role, text, count):
-    """The kept ``text`` message once the summary of the ``count`` messages before it opens its content."""
-    parts = [{"offset": 0, "metadata": {}, "tracking_id": unittest.mock.ANY}, {"offset": 1, "metadata": {}}]
-    return {
-        "role": role,
-        "content": [_marked(count), {"text": text}],
-        "metadata": {"custom": {"merged_messages": parts}},
-    }
 
 
 def _tool_use(tool_use_id):
@@ -989,14 +979,29 @@ class TestSummaryPlacement:
 
     def test_places_a_non_text_summary_verbatim_as_its_own_message(self):
         messages = [_text("user", "q1"), _text("assistant", "a1"), _text("user", "q2"), _text("assistant", "a2")]
-        summary = Message(role="assistant", content=[REDACTED])
+        summary = Message(role="user", content=[REDACTED])
 
-        assert _place_summary(messages, [0, 1], (0, "user"), summary) is True
+        assert _place_summary(messages, [0, 1, 2], (0, "user"), summary) is True
         assert messages == [
-            {"role": "assistant", "content": [REDACTED], "tracking_id": unittest.mock.ANY},
-            _text("user", "q2"),
+            {"role": "user", "content": [REDACTED], "tracking_id": unittest.mock.ANY},
             _text("assistant", "a2"),
         ]
+
+    def test_ends_a_user_message_that_opens_with_a_tool_result_with_the_summary(self):
+        messages = [_text("user", "q0"), _text("assistant", "a1"), _text("user", "q2"), _tool_result("t1")]
+        messages.append(_text("assistant", "a4"))
+        summary = Message(role="user", content=[_marked(1)])
+
+        assert _place_summary(messages, [2], (2, "user"), summary) is True
+        assert messages[2]["content"] == [*_tool_result("t1")["content"], _marked(1)]
+
+    def test_leaves_the_history_unchanged_when_a_non_text_summary_would_open_it_as_an_assistant_message(self):
+        messages = [_text("user", "q1"), _text("assistant", "a1"), _text("user", "q2"), _text("assistant", "a2")]
+        original = list(messages)
+        summary = Message(role="assistant", content=[REDACTED])
+
+        assert _place_summary(messages, [0, 1], (0, "user"), summary) is False
+        assert messages == original
 
     def test_leaves_the_history_unchanged_when_a_non_text_summary_shares_a_role_with_a_kept_neighbor(self):
         messages = [_text("user", "q1"), _text("assistant", "a1"), _text("user", "q2"), _text("assistant", "a2")]
@@ -1008,15 +1013,15 @@ class TestSummaryPlacement:
 
     @pytest.mark.asyncio
     async def test_places_an_override_compaction_block_with_its_own_role(self, routing_agent):
-        summary = Message(role="assistant", content=[REDACTED])
+        summary = Message(role="user", content=[REDACTED])
         routing_agent.model.summarize.return_value = SummarizeResult(summary=summary)
-        strategy = Offload.summarize("*").when(utilization=0.5, preserve_recent=3)
+        strategy = Offload.summarize("*").when(utilization=0.5, preserve_recent=2)
         messages = [_text("user", "u0"), _text("assistant", "a1"), _text("user", "u2"), _text("assistant", "a3")]
         messages.append(_text("user", "u4"))
-        kept = messages[2:]
+        kept = messages[3:]
 
         assert await strategy.apply(ContextState(messages=messages, agent=routing_agent, utilization=0.9)) is True
-        assert messages == [{"role": "assistant", "content": [REDACTED], "tracking_id": unittest.mock.ANY}, *kept]
+        assert messages == [{"role": "user", "content": [REDACTED], "tracking_id": unittest.mock.ANY}, *kept]
 
     @pytest.mark.asyncio
     async def test_warns_and_keeps_the_history_when_an_override_compaction_block_does_not_alternate(
@@ -1047,7 +1052,7 @@ class TestSummaryPlacement:
         messages += [_text("assistant", "a7"), _text("user", "u8")]
         assert await strategy.apply(ContextState(messages=messages, agent=routing_agent, utilization=0.9)) is True
 
-        exp_carrier = _opened_by_summary("assistant", "a7", 2)
+        exp_carrier = {"role": "assistant", "content": [{"text": "a7"}, _marked(2)]}
         assert messages == [task, tool_use, tool_result, exp_carrier, _text("user", "u8")]
 
     @pytest.mark.asyncio

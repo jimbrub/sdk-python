@@ -68,20 +68,6 @@ function makeContext(messages: Message[], utilization = 0.5, model?: unknown): C
   }
 }
 
-/** The kept `value` message once `summary`, of the messages before it, opens its content. */
-function openedBySummary(summary: TextBlock, value: string, trackingId: string = anyTrackingId): Message {
-  const parts = [
-    { trackingId: anyTrackingId, offset: 0, metadata: {} },
-    { trackingId, offset: 1, metadata: {} },
-  ]
-  return new Message({
-    role: 'assistant',
-    content: [summary, new TextBlock(value)],
-    trackingId,
-    metadata: { custom: { mergedMessages: parts } },
-  })
-}
-
 describe('Offload.summarize', () => {
   it('creates a strategy with correct name', () => {
     const strategy = Offload.summarize('toolResults')
@@ -678,7 +664,13 @@ describe('routing through Model.summarize', () => {
     ]
 
     expect(await strategy.apply(makeRoutingContext(messages, 0.9, model))).toBe(true)
-    expect(messages).toEqual([task, ack, note, openedBySummary(marked(4), 'a7'), latest])
+    expect(messages).toEqual([
+      task,
+      ack,
+      note,
+      new Message({ role: 'assistant', content: [new TextBlock('a7'), marked(4)], trackingId: anyTrackingId }),
+      latest,
+    ])
   })
 
   it('skips the pass when every gap lies between pinned messages of both roles', async () => {
@@ -834,7 +826,11 @@ describe('routing through Model.summarize', () => {
     expect(received).toEqual([original.slice(1, 3)])
     expect(model.summarize).not.toHaveBeenCalled()
     expect(vi.mocked(Model.prototype.summarize).mock.contexts).toEqual([model])
-    expect(messages).toEqual([task, openedBySummary(marked(2), 'old3'), original[4]])
+    expect(messages).toEqual([
+      task,
+      new Message({ role: 'assistant', content: [new TextBlock('old3'), marked(2)], trackingId: anyTrackingId }),
+      original[4],
+    ])
   })
 
   it('leaves a pinned message before the cut out of the summary', async () => {
@@ -850,7 +846,11 @@ describe('routing through Model.summarize', () => {
     expect(await strategy.apply(makeRoutingContext(messages, 0.9, model))).toBe(true)
     expect(received).toEqual([[original[0], original[1], original[3], original[4]]])
     expect(model.summarize).not.toHaveBeenCalled()
-    expect(messages).toEqual([pinned, openedBySummary(marked(4), 'c', original[5]!.trackingId), original[6]])
+    expect(messages).toEqual([
+      pinned,
+      new Message({ role: 'assistant', content: [new TextBlock('c'), marked(4)], trackingId: original[5]!.trackingId }),
+      original[6],
+    ])
   })
 
   it('passes no instruction without a custom system prompt', async () => {
@@ -922,7 +922,7 @@ describe('routing through Model.summarize', () => {
     expect(model.summarize).not.toHaveBeenCalled()
     expect(messages).toEqual([
       original[0],
-      openedBySummary(marked(4), 'a', original[3]!.trackingId),
+      new Message({ role: 'assistant', content: [new TextBlock('a'), marked(4)], trackingId: original[3]!.trackingId }),
       original[4],
       original[7],
       original[8],
@@ -1015,13 +1015,25 @@ describe('summary placement', () => {
 
   it('places an override compaction block verbatim as its own message with its own role', async () => {
     const model = new MockMessageModel()
-    const summary = new Message({ role: 'assistant', content: [redacted] })
-    const strategy = Offload.summarize('*', { model }).when({ utilization: 0.5, preserveRecent: 3 })
+    const summary = new Message({ role: 'user', content: [redacted] })
+    const strategy = Offload.summarize('*', { model }).when({ utilization: 0.5, preserveRecent: 2 })
     const messages = history()
     const original = [...messages]
 
     expect(await strategy.apply(makeContext(messages, model, { summary }))).toBe(true)
-    expect(messages).toEqual([summary, ...original.slice(2)])
+    expect(messages).toEqual([summary, ...original.slice(3)])
+  })
+
+  it('keeps the history when an override compaction block would open it as an assistant message', async () => {
+    const model = new MockMessageModel()
+    const summary = new Message({ role: 'assistant', content: [redacted] })
+    vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    const strategy = Offload.summarize('*', { model }).when({ utilization: 0.5, preserveRecent: 3 })
+    const messages = history()
+    const original = [...messages]
+
+    expect(await strategy.apply(makeContext(messages, model, { summary }))).toBe(false)
+    expect(messages).toEqual(original)
   })
 
   it('warns and keeps the history when an override compaction block does not alternate', async () => {
@@ -1060,7 +1072,7 @@ describe('summary placement', () => {
       task,
       toolUse,
       toolResult,
-      openedBySummary(marked(2), 'a7'),
+      new Message({ role: 'assistant', content: [new TextBlock('a7'), marked(2)], trackingId: anyTrackingId }),
       new Message({ role: 'user', content: [new TextBlock('u8')], trackingId: anyTrackingId }),
     ])
     expect(messages[2]!.content).toEqual(makeToolResultMessage('ok', 't1').content)
