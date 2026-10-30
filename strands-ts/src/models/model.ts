@@ -652,7 +652,7 @@ export abstract class Model<T extends BaseModelConfig = BaseModelConfig> {
               yield block
             } catch (e: unknown) {
               if (e instanceof SyntaxError) {
-                logger.error('unable to parse tool input JSON', e)
+                logger.error(TOOL_INPUT_PARSE_MESSAGE, e)
                 toolInputParseError = e
               }
             }
