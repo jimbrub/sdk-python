@@ -374,6 +374,24 @@ describe('repeated summarization', () => {
   })
 })
 
+describe('base summarize', () => {
+  it('summarizes the messages after message 0, keeping it verbatim', async () => {
+    const summarizer = new MockMessageModel().addTurn({ type: 'textBlock', text: 'summary' })
+    const strategy = Offload.summarize('*', { model: summarizer }).when({ utilization: 0.5, preserveRecent: 2 })
+    const text = (role: 'user' | 'assistant', value: string): Message =>
+      new Message({ role, content: [new TextBlock(value)] })
+    const messages = [text('user', 'task'), text('assistant', 'a1'), text('user', 'u2')]
+    messages.push(text('assistant', 'a3'), text('user', 'u4'))
+
+    expect(await strategy.apply(makeContext(messages, 0.9))).toBe(true)
+    expect(messages).toHaveLength(3)
+    expect(messages[0]!.content).toEqual([new TextBlock('task')])
+    expect(messages[1]!.content[0]).toEqual(new TextBlock('a3'))
+    expect((messages[1]!.content[1] as TextBlock).text).toMatch(/^\[Summarized: 2 messages,/)
+    expect(messages[2]!.content).toEqual([new TextBlock('u4')])
+  })
+})
+
 describe('routing through Model.summarize', () => {
   const text = (role: 'user' | 'assistant', value: string): Message =>
     new Message({ role, content: [new TextBlock(value)] })

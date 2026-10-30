@@ -239,6 +239,11 @@ function carrierIndex(messages: Message[], position: number, role: Role): number
   return undefined
 }
 
+/** Whether `model` replaces the base `Model.summarize()`, as a server-side compaction does. */
+function overridesSummarize(model: Model): boolean {
+  return model.summarize !== Model.prototype.summarize
+}
+
 /** Adds a `Model.summarize()` call's usage, if it reported any, to the request it ran in. */
 function recordSummaryUsage(invocationContext: InvocationContext | undefined, result: SummarizeResult): void {
   if (result.usage) unwrapInvocationContext(invocationContext)?.recordUsage(result.usage)
@@ -287,10 +292,11 @@ export class SummarizeStrategy extends BaseOffloadStrategy {
   /**
    * Returns the indices of the messages this pass summarizes, in history order, leaving out pinned ones.
    *
-   * A recency-only pass takes the messages before the compaction cut; a target or threshold pass takes the
-   * eligible messages and their tool pairs.
+   * A recency-only pass takes the messages before the compaction cut, keeping message 0 verbatim unless `model`
+   * overrides `Model.summarize()` for a server-side compaction of the conversation's start; a target or threshold
+   * pass takes the eligible messages and their tool pairs.
    */
-  private async _select(context: ContextState): Promise<number[]> {
+  private async _select(context: ContextState, model: Model): Promise<number[]> {
     const { messages } = context
     const recencyOnly = (this._target === undefined || this._target === '*') && this._threshold === undefined
     if (!recencyOnly) {
@@ -299,7 +305,10 @@ export class SummarizeStrategy extends BaseOffloadStrategy {
       return indices.length === 1 && isSummary(messages[indices[0]!]!) ? [] : indices
     }
     const split = recencySplit(messages, this._preserveRecent)
-    const selected = Array.from({ length: split }, (_, index) => index).filter((index) => !isPinned(messages, index))
+    const first = overridesSummarize(model) ? 0 : 1
+    const selected = Array.from({ length: Math.max(split - first, 0) }, (_, index) => first + index).filter(
+      (index) => !isPinned(messages, index)
+    )
     // After a pass behind a pinned message, the only unpinned message before the cut is that pass's summary.
     return selected.length > 1 ? selected : []
   }
@@ -308,7 +317,7 @@ export class SummarizeStrategy extends BaseOffloadStrategy {
   protected override async _applyPerMessage(context: ContextState): Promise<boolean> {
     const model = this._resolveModel(context.agent)
     if (!model) return false
-    const selected = await this._select(context)
+    const selected = await this._select(context, model)
     if (selected.length === 0) return false
     const { messages, agent } = context
     const plan = summaryPlan(messages, selected)

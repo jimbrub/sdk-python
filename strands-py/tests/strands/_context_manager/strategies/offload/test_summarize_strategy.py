@@ -13,6 +13,7 @@ from strands.models._summarize import _DEFAULT_SUMMARIZER_SYSTEM_PROMPT
 from strands.models.model import Model
 from strands.types.content import ContentBlock, Message, Messages
 from strands.types.tools import ToolResult, ToolUse
+from tests.fixtures.mocked_model_provider import MockedModelProvider
 
 
 def _make_stream_events(text: str):
@@ -533,6 +534,28 @@ class TestRepeatedSummarizationKeepsMessageZeroVerbatim:
             block for message in messages for block in message["content"] if "[Summarized:" in block.get("text", "")
         ]
         assert len(summaries) == 1
+
+
+class TestBaseSummarizeKeepsMessageZeroVerbatim:
+    """A recency pass through the base ``Model.summarize()`` never summarizes message 0."""
+
+    @pytest.fixture
+    def base_model_agent(self, mock_agent):
+        mock_agent.model = MockedModelProvider([_text("assistant", "summary")])
+        mock_agent.aux_model = mock_agent.model
+        return mock_agent
+
+    @pytest.mark.asyncio
+    async def test_summarizes_the_messages_after_message_zero(self, base_model_agent):
+        strategy = Offload.summarize("*").when(utilization=0.5, preserve_recent=2)
+        messages: Messages = [_text("user", "task"), _text("assistant", "a1"), _text("user", "u2")]
+        messages += [_text("assistant", "a3"), _text("user", "u4")]
+
+        assert await strategy.apply(ContextState(messages=messages, agent=base_model_agent, utilization=0.9)) is True
+        assert messages[0] == _text("user", "task")
+        assert messages[1]["content"][0] == {"text": "a3"}
+        assert messages[1]["content"][1]["text"].startswith("[Summarized: 2 messages,")
+        assert messages[2] == _text("user", "u4")
 
 
 class TestSummarizationWithToolCalls:
