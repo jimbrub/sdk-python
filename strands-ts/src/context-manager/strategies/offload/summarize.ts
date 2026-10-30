@@ -95,6 +95,23 @@ function summaryPlan(messages: Message[], indices: number[]): { indices: number[
   return { indices: kept, slot: { start: slot.run[0]!, role: slot.role } }
 }
 
+/**
+ * Returns `summaryPlan` for `indices`, or, when it finds no slot, for `indices` without message 0.
+ *
+ * Kept, message 0 lets the summary follow it, which fits when the only slot at the start of the history lies
+ * before a pinned message of the summary's role. A tool result paired with message 0 is kept with it.
+ */
+function planAfterMessageZero(
+  messages: Message[],
+  indices: number[]
+): { indices: number[]; slot: SummarySlot } | undefined {
+  const plan = summaryPlan(messages, indices)
+  if (plan || indices[0] !== 0) return plan
+  const keptHead = messages.length > 1 && splitsToolPair(messages, 1) ? 2 : 1
+  const rest = indices.filter((index) => index >= keptHead)
+  return rest.length > 0 ? summaryPlan(messages, rest) : undefined
+}
+
 /** Splits sorted `indices` into runs of consecutive indices. */
 function runs(indices: number[]): number[][] {
   const result: number[][] = []
@@ -320,7 +337,7 @@ export class SummarizeStrategy extends BaseOffloadStrategy {
     const selected = await this._select(context, model)
     if (selected.length === 0) return false
     const { messages, agent } = context
-    const plan = summaryPlan(messages, selected)
+    const plan = planAfterMessageZero(messages, selected)
     if (!plan) {
       logger.debug(`summarized=<${selected.length}> | no place outside pinned messages for the summary`)
       return false

@@ -95,6 +95,20 @@ def _summary_plan(messages: Messages, indices: list[int]) -> tuple[list[int], tu
     return kept, (slot_run[0], role)
 
 
+def _plan_after_message_zero(messages: Messages, indices: list[int]) -> tuple[list[int], tuple[int, Role]] | None:
+    """Return ``_summary_plan`` for ``indices``, or, when it finds no slot, for ``indices`` without message 0.
+
+    Kept, message 0 lets the summary follow it, which fits when the only slot at the start of the history lies
+    before a pinned message of the summary's role. A tool result paired with message 0 is kept with it.
+    """
+    plan = _summary_plan(messages, indices)
+    if plan is not None or not indices or indices[0] != 0:
+        return plan
+    kept_head = 2 if len(messages) > 1 and _splits_tool_pair(messages, 1) else 1
+    rest = [index for index in indices if index >= kept_head]
+    return _summary_plan(messages, rest) if rest else None
+
+
 def _runs(indices: list[int]) -> list[list[int]]:
     """Split sorted ``indices`` into runs of consecutive indices."""
     runs: list[list[int]] = []
@@ -339,7 +353,7 @@ class SummarizeStrategy(BaseOffloadStrategy):
         if not indices:
             return False
         messages = context.messages
-        plan = _summary_plan(messages, indices)
+        plan = _plan_after_message_zero(messages, indices)
         if plan is None:
             logger.debug("summarized=<%s> | no place outside pinned messages for the summary", len(indices))
             return False

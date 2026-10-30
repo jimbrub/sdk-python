@@ -356,6 +356,23 @@ class TestSummarizeStrategyMessageLevel:
         assert messages == [task, exp_carrier, _text("user", "recent")]
 
     @pytest.mark.asyncio
+    async def test_keeps_message_zero_when_the_only_slot_before_it_lies_before_a_pinned_user_message(
+        self, routing_agent, base_summarize
+    ):
+        # Regression test for https://github.com/strands-agents/harness-sdk/pull/5470#issuecomment-6527709380
+        strategy = Offload.summarize("*").when(utilization=0.5, preserve_recent=2)
+        prompt = Message(role="user", content=[ContentBlock(text="now add tests")], metadata=PINNED)
+        messages: Messages = [_text("user", "task"), _tool_use("t1"), _tool_result("t1"), _tool_use("t2")]
+        messages += [_tool_result("t2"), _text("assistant", "done"), prompt, _text("assistant", "ok")]
+        original = list(messages)
+
+        assert await strategy.apply(ContextState(messages=messages, agent=routing_agent, utilization=0.9)) is True
+        routing_agent.model.summarize.assert_not_called()
+        assert base_summarize.call_args.args == (routing_agent.model, original[1:6])
+        exp_summary = {"role": "assistant", "content": [_marked(5)], "tracking_id": unittest.mock.ANY}
+        assert messages == [_text("user", "task"), exp_summary, prompt, _text("assistant", "ok")]
+
+    @pytest.mark.asyncio
     async def test_keeps_the_summary_out_of_a_pinned_assistant_message_so_the_next_pass_summarizes_it(
         self, routing_agent, base_summarize
     ):

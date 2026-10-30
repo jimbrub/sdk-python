@@ -744,6 +744,31 @@ describe('routing through Model.summarize', () => {
     expect(messages).toEqual(original)
   })
 
+  // Regression test for https://github.com/strands-agents/harness-sdk/pull/5470#issuecomment-6527709380
+  it('keeps message 0 when the only slot before it lies before a pinned user message', async () => {
+    const model = new MockMessageModel()
+    const received = mockSummarize(model)
+    const strategy = Offload.summarize('*', { model }).when({ utilization: 0.5, preserveRecent: 2 })
+    const prompt = new Message({
+      role: 'user',
+      content: [new TextBlock('now add tests')],
+      metadata: { custom: { pinned: true } },
+    })
+    const messages = [text('user', 'task'), toolUse('t1'), makeToolResultMessage('x', 't1'), toolUse('t2')]
+    messages.push(makeToolResultMessage('x', 't2'), text('assistant', 'done'), prompt, text('assistant', 'ok'))
+    const original = [...messages]
+
+    expect(await strategy.apply(makeRoutingContext(messages, 0.9, model))).toBe(true)
+    expect(received).toEqual([original.slice(1, 6)])
+    expect(model.summarize).not.toHaveBeenCalled()
+    expect(messages).toEqual([
+      original[0],
+      new Message({ role: 'assistant', content: [marked(5)], trackingId: anyTrackingId }),
+      prompt,
+      original[7],
+    ])
+  })
+
   it('summarizes the messages after a pinned task into assistant content behind it', async () => {
     const model = new MockMessageModel()
     const received = mockSummarize(model)
