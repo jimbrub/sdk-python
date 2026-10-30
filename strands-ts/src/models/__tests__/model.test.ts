@@ -1514,6 +1514,15 @@ describe('summarize', () => {
     await expect(model.summarize([text('user', 'task')])).rejects.toBe(error)
   })
 
+  it('rethrows a provider error caused by a body that does not parse', async () => {
+    const model = new TestModelProvider(async function* () {
+      yield { type: 'modelMessageStartEvent', role: 'assistant' }
+      JSON.parse('{garbled')
+    })
+
+    await expect(model.summarize([text('user', 'task')])).rejects.toMatchObject({ cause: expect.any(SyntaxError) })
+  })
+
   it('forwards the cancel signal to the stream call', async () => {
     const model = new MockMessageModel().addTurn({ type: 'textBlock', text: 'summary' })
     const streamSpy = vi.spyOn(model, 'stream')

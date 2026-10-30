@@ -29,6 +29,7 @@ import { MaxTokensError, ModelError, normalizeError } from '../errors.js'
 import {
   INCOMPLETE_STREAM_MESSAGE,
   summarizeWithStream,
+  TOOL_INPUT_PARSE_MESSAGE,
   type SummarizeOptions,
   type SummarizeResult,
 } from './summarize.js'
@@ -728,7 +729,7 @@ export abstract class Model<T extends BaseModelConfig = BaseModelConfig> {
       }
 
       if (toolInputParseError !== undefined) {
-        throw new ModelError('unable to parse tool input JSON', { cause: toolInputParseError })
+        throw new ModelError(TOOL_INPUT_PARSE_MESSAGE, { cause: toolInputParseError })
       }
 
       // Return the final message with stop reason and optional metadata

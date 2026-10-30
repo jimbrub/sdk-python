@@ -163,7 +163,7 @@ const COMPLETE_STOP_REASONS: ReadonlySet<StopReason> = new Set(['endTurn', 'stop
 function writesNoSummary(error: unknown): boolean {
   if (error instanceof MaxTokensError) return true
   if (!(error instanceof ModelError)) return false
-  return error.message === INCOMPLETE_STREAM_MESSAGE || error.cause instanceof SyntaxError
+  return error.message === INCOMPLETE_STREAM_MESSAGE || error.message === TOOL_INPUT_PARSE_MESSAGE
 }
 
 /**
@@ -172,6 +172,13 @@ function writesNoSummary(error: unknown): boolean {
  * @internal
  */
 export const INCOMPLETE_STREAM_MESSAGE = 'Stream ended without completing a message'
+
+/**
+ * The {@link ModelError} message {@link Model.streamAggregated} throws when a reply's tool input does not parse.
+ *
+ * @internal
+ */
+export const TOOL_INPUT_PARSE_MESSAGE = 'unable to parse tool input JSON'
 
 /** Returns the generated text of a text or citations block. */
 function blockText(block: ContentBlock): string[] {
