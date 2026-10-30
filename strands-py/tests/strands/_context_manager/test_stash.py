@@ -528,3 +528,19 @@ class TestStashRefsAfterMerge:
         refs = [stash.refs_for(block, merged, index) for index, block in enumerate(merged["content"])]
         assert refs == [["unknown_0"], ["c_0"]]
         assert [await stash.retrieve(ref) for [ref] in refs] == [{"text": "a"}, {"text": "b"}]
+
+    @pytest.mark.asyncio
+    async def test_keeps_refs_of_an_id_less_merge_merged_into_a_message_with_an_id(self, stash):
+        messages = [
+            Message(role="user", content=[ContentBlock(text="a")]),
+            Message(role="user", content=[ContentBlock(text="b")]),
+            Message(role="user", content=[ContentBlock(text="c")], tracking_id="c"),
+        ]
+        for message in messages:
+            await stash.store_message(message)
+        _repair_alternation(messages)
+
+        merged = messages[0]
+        refs = [stash.refs_for(block, merged, index) for index, block in enumerate(merged["content"])]
+        assert merged["tracking_id"] == "c"
+        assert refs == [["unknown_0"], ["unknown_0"], ["c_0"]]

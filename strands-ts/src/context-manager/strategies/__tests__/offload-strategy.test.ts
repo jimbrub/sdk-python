@@ -924,9 +924,11 @@ describe('repairAlternation', () => {
 
   it("keeps both messages' tracking ids and metadata", () => {
     const usage = { inputTokens: 1, outputTokens: 2, totalTokens: 3 }
+    const prevMetadata = { usage, custom: { source: 'a' } }
+    const currentMetadata = { custom: { pinned: true, note: 'b' } }
     const messages = [
-      user('p', { custom: { source: 'a' } }),
-      user('c', { usage, custom: { pinned: true, note: 'b' } }),
+      user('p', prevMetadata),
+      user('c', currentMetadata),
       new Message({ role: 'assistant', content: [new TextBlock('reply')] }),
     ]
 
@@ -938,9 +940,24 @@ describe('repairAlternation', () => {
       custom: {
         source: 'a',
         pinned: true,
-        mergedMessages: [{ trackingId: 'c', offset: 1, metadata: { usage, custom: { pinned: true, note: 'b' } } }],
+        mergedMessages: [
+          { trackingId: 'p', offset: 0, metadata: prevMetadata },
+          { trackingId: 'c', offset: 1, metadata: currentMetadata },
+        ],
       },
     })
+  })
+
+  it('takes usage from the later message so the estimate counts its content', () => {
+    const older = { inputTokens: 10, outputTokens: 5, totalTokens: 15 }
+    const newer = { inputTokens: 20, outputTokens: 5, totalTokens: 25 }
+    const assistant = (text: string, usage: typeof older): Message =>
+      new Message({ role: 'assistant', content: [new TextBlock(text)], metadata: { usage } })
+    const messages = [user('task'), assistant('a', older), assistant('b', newer)]
+
+    repairAlternation(messages)
+
+    expect(messages[1]!.metadata!.usage).toEqual(newer)
   })
 
   it('records messages merged into either side at their offsets in the merge', () => {
@@ -954,6 +971,7 @@ describe('repairAlternation', () => {
 
     const merged = messages[0]!.metadata!.custom!.mergedMessages as { trackingId: string; offset: number }[]
     expect(merged.map(({ trackingId, offset }) => [trackingId, offset])).toEqual([
+      ['p', 0],
       ['q', 1],
       ['c', 2],
       ['d', 3],

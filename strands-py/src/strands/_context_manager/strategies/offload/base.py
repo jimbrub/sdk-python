@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import math
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from typing_extensions import TypedDict
 
@@ -258,44 +258,33 @@ def _repair_alternation(messages: Messages) -> None:
 def _merge_messages(prev: Message, current: Message) -> Message:
     """Return ``prev`` with ``current``'s content appended, losing neither message's tracking id or metadata.
 
-    The merge keeps ``prev``'s tracking id, or ``current``'s when ``prev`` has none, and ``prev``'s metadata, and is
-    pinned when either message is. ``current``'s tracking id and metadata are recorded under
-    ``metadata.custom.merged_messages`` with the offset its content starts at, so stash refs to its blocks still
-    resolve.
+    ``metadata.custom.merged_messages`` lists every message the merge combines, in content order, with its tracking
+    id, metadata and the offset its content starts at, so stash refs to each one's blocks still resolve. The merge
+    keeps ``prev``'s tracking id, or ``current``'s when ``prev`` has none, and ``prev``'s custom metadata; its usage
+    and metrics are ``current``'s, the latest response it holds. It is pinned when either message is.
     """
-    offset = len(prev["content"])
     merged = Message(role=prev["role"], content=[*prev["content"], *current["content"]])
-    metadata: MessageMetadata = {**prev.get("metadata", {})}
-    custom = {**metadata.get("custom", {})}
-    if "tracking_id" in prev:
-        merged["tracking_id"] = prev["tracking_id"]
-    elif "tracking_id" in current:
-        merged["tracking_id"] = current["tracking_id"]
-        # An origin without a tracking id keeps refs to prev's blocks on the keys they were stashed under.
-        custom.setdefault(MERGED_MESSAGES_KEY, [{"offset": 0, "metadata": {}}])
-    current_metadata, current_merged = _split_merged(current)
-    origin: dict[str, object] = {"offset": offset, "metadata": current_metadata}
-    if "tracking_id" in current:
-        origin["tracking_id"] = current["tracking_id"]
-    shifted = [{**entry, "offset": entry["offset"] + offset} for entry in current_merged]
-    custom[MERGED_MESSAGES_KEY] = [*custom.get(MERGED_MESSAGES_KEY, []), origin, *shifted]
+    tracking_id = prev.get("tracking_id") or current.get("tracking_id")
+    if tracking_id:
+        merged["tracking_id"] = tracking_id
+    parts = [*_merged_parts(prev, 0), *_merged_parts(current, len(prev["content"]))]
+    custom = {**prev.get("metadata", {}).get("custom", {}), MERGED_MESSAGES_KEY: parts}
     if _has_pinned_flag(prev) or _has_pinned_flag(current):
         custom["pinned"] = True
-    metadata["custom"] = custom
+    metadata: MessageMetadata = {**current.get("metadata", {}), "custom": custom}
     merged["metadata"] = metadata
     return merged
 
 
-def _split_merged(message: Message) -> tuple[MessageMetadata, list[dict]]:
-    """Return ``message``'s metadata without its merged-message entries, and those entries."""
-    metadata: MessageMetadata = {**message.get("metadata", {})}
-    custom = {**metadata.get("custom", {})}
-    merged = custom.pop(MERGED_MESSAGES_KEY, [])
-    if custom:
-        metadata["custom"] = custom
-    else:
-        metadata.pop("custom", None)
-    return metadata, merged
+def _merged_parts(message: Message, offset: int) -> list[dict[str, Any]]:
+    """Return the messages ``message`` combines, at their offsets in a merge where its content starts at ``offset``."""
+    parts = message.get("metadata", {}).get("custom", {}).get(MERGED_MESSAGES_KEY)
+    if parts is not None:
+        return [{**part, "offset": part["offset"] + offset} for part in parts]
+    part: dict[str, Any] = {"offset": offset, "metadata": message.get("metadata", {})}
+    if "tracking_id" in message:
+        part["tracking_id"] = message["tracking_id"]
+    return [part]
 
 
 def _resolve_tool_filter(target: OffloadTarget | None) -> tuple[set[str] | None, set[str] | None]:
