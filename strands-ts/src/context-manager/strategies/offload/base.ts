@@ -12,11 +12,12 @@ import {
   CachePointBlock,
   ReasoningBlock,
 } from '../../../types/messages.js'
-import type { ContentBlock } from '../../../types/messages.js'
+import type { ContentBlock, MessageMetadata } from '../../../types/messages.js'
+import type { JSONValue } from '../../../types/json.js'
 import type { InvocationContext } from '../../../agent/invocation-context.js'
 import type { LocalAgent } from '../../../types/agent.js'
 import type { ContextStrategy, ContextState } from '../../types.js'
-import type { Stash } from '../../stash.js'
+import { MERGED_MESSAGES_KEY, mergedMessages, type MergedMessage, type Stash } from '../../stash.js'
 import { RETRIEVAL_TOOL_NAME } from '../../retrieval-tool.js'
 import { hasPinnedFlag, isPinned } from '../../../conversation-manager/compression/pin-message.js'
 
@@ -271,20 +272,44 @@ export function repairAlternation(messages: Message[]): void {
   for (let readIndex = 0; readIndex < messages.length; readIndex++) {
     const current = messages[readIndex]!
     if (writeIndex > 0 && messages[writeIndex - 1]!.role === current.role) {
-      const prev = messages[writeIndex - 1]!
-      const pinned = hasPinnedFlag(prev) || hasPinnedFlag(current)
-      messages[writeIndex - 1] = new Message({
-        role: prev.role,
-        content: [...prev.content, ...current.content],
-        trackingId: prev.trackingId,
-        ...(pinned ? { metadata: { custom: { pinned: true } } } : {}),
-      })
+      messages[writeIndex - 1] = mergeMessages(messages[writeIndex - 1]!, current)
     } else {
       messages[writeIndex] = current
       writeIndex++
     }
   }
   messages.length = writeIndex
+}
+
+/**
+ * Returns `prev` with `current`'s content appended, losing neither message's tracking id or metadata.
+ *
+ * The merge keeps `prev`'s tracking id and metadata, and is pinned when either message is. `current`'s tracking id
+ * and metadata are recorded under `metadata.custom.mergedMessages` with the offset its content starts at, so stash
+ * refs to its blocks still resolve.
+ */
+function mergeMessages(prev: Message, current: Message): Message {
+  const offset = prev.content.length
+  const origin: MergedMessage = { trackingId: current.trackingId, offset, metadata: withoutMerged(current) }
+  const shifted = mergedMessages(current).map((entry) => ({ ...entry, offset: entry.offset + offset }))
+  const custom = {
+    ...prev.metadata?.custom,
+    [MERGED_MESSAGES_KEY]: [...mergedMessages(prev), origin, ...shifted] as unknown as JSONValue,
+    ...(hasPinnedFlag(prev) || hasPinnedFlag(current) ? { pinned: true } : {}),
+  }
+  return new Message({
+    role: prev.role,
+    content: [...prev.content, ...current.content],
+    trackingId: prev.trackingId,
+    metadata: { ...prev.metadata, custom },
+  })
+}
+
+/** Returns `message`'s metadata without its merged-message entries. */
+function withoutMerged(message: Message): MessageMetadata {
+  const { [MERGED_MESSAGES_KEY]: _merged, ...custom } = message.metadata?.custom ?? {}
+  const { custom: _custom, ...metadata } = message.metadata ?? {}
+  return Object.keys(custom).length > 0 ? { ...metadata, custom } : metadata
 }
 
 /**
