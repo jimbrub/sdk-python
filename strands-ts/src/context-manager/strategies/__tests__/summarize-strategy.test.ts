@@ -145,7 +145,7 @@ describe('Offload.summarize', () => {
       expect(await strategy.apply(context)).toBe(true)
       expect(Model.prototype.summarize).toHaveBeenCalledWith(
         [new Message({ role: 'assistant', content: [new TextBlock(largeText)], trackingId: anyTrackingId })],
-        { summarizerSystemPrompt: 'Keep ids', cancelSignal: context.agent.cancelSignal }
+        { instructions: 'Keep ids', cancelSignal: context.agent.cancelSignal }
       )
     })
 
@@ -167,7 +167,7 @@ describe('Offload.summarize', () => {
       )
     })
 
-    it('sends a block to the base summarize without a summarizer system prompt by default', async () => {
+    it('sends a block to the base summarize without instructions by default', async () => {
       const largeText = 'x'.repeat(2500 * 4 + 100)
       const message = new Message({ role: 'assistant', content: [new TextBlock(largeText)] })
       const strategy = Offload.summarize('assistantText')
@@ -428,7 +428,7 @@ describe('routing through Model.summarize', () => {
     return received
   }
 
-  it('sends a whole-history message-level summary through summarize with the live prompt, tools, and summarizer system prompt', async () => {
+  it('sends a whole-history message-level summary through summarize with the live prompt, tools, and instructions', async () => {
     const model = new MockMessageModel()
     const received = mockSummarize(model)
     const strategy = Offload.summarize('*', { model, systemPrompt: 'Keep ids' }).when({
@@ -449,7 +449,7 @@ describe('routing through Model.summarize', () => {
     expect(model.summarize).toHaveBeenCalledWith(original.slice(0, 5), {
       systemPrompt: 'live system prompt',
       toolSpecs: [toolSpec],
-      summarizerSystemPrompt: 'Keep ids',
+      instructions: 'Keep ids',
       cancelSignal: context.agent.cancelSignal,
     })
     expect(messages).toEqual([markedSummary(5), ...original.slice(5)])

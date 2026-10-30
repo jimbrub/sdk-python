@@ -29,8 +29,8 @@ export interface SummarizeOptions {
   /** The live conversation's tool specifications, for an override. */
   toolSpecs?: ToolSpec[]
 
-  /** System prompt for the summarizer, replacing the default one. */
-  summarizerSystemPrompt?: string
+  /** Summarization system prompt that replaces the default one. */
+  instructions?: string
 
   /** Signal that aborts the call, for an override and forwarded to the base stream call. */
   cancelSignal?: AbortSignal
@@ -54,7 +54,7 @@ export interface SummarizeResult {
  *
  * @internal
  */
-export const DEFAULT_SUMMARIZER_SYSTEM_PROMPT = [
+export const DEFAULT_SUMMARIZE_INSTRUCTIONS = [
   'You are a summarization assistant. Produce a concise factual summary that preserves:',
   '- Key data, values, and identifiers',
   '- Important decisions and conclusions',
@@ -80,12 +80,12 @@ export const DEFAULT_SUMMARIZER_SYSTEM_PROMPT = [
 export async function summarizeWithStream(
   model: Model,
   messages: Message[],
-  options: Pick<SummarizeOptions, 'summarizerSystemPrompt' | 'cancelSignal'> = {}
+  options: Pick<SummarizeOptions, 'instructions' | 'cancelSignal'> = {}
 ): Promise<SummarizeResult> {
   const content = [new TextBlock('<content>'), ...flattenMessagesToContent(messages), new TextBlock('</content>')]
   const request = [new Message({ role: 'user', content })]
   const streamOptions: StreamOptions = {
-    systemPrompt: options.summarizerSystemPrompt || DEFAULT_SUMMARIZER_SYSTEM_PROMPT,
+    systemPrompt: options.instructions || DEFAULT_SUMMARIZE_INSTRUCTIONS,
     ...(options.cancelSignal && { cancelSignal: options.cancelSignal }),
   }
   const { reply, usage } = await readSummary(model.streamAggregated(request, streamOptions))

@@ -366,7 +366,7 @@ class SummarizeStrategy(BaseOffloadStrategy):
             tool_specs=agent.tool_registry.get_all_tool_specs(),
             system_prompt=agent.system_prompt,
             system_prompt_content=agent.system_prompt_content,
-            summarizer_system_prompt=self._config.get("system_prompt"),
+            instructions=self._config.get("system_prompt"),
             cancel_signal=agent.cancel_signal,
         )
         _record_summary_usage(context.invocation_context, result)
@@ -455,7 +455,7 @@ class SummarizeStrategy(BaseOffloadStrategy):
             result = await Model.summarize(
                 model,
                 _block_request(block, message, agent.messages),
-                summarizer_system_prompt=self._config.get("system_prompt"),
+                instructions=self._config.get("system_prompt"),
                 cancel_signal=agent.cancel_signal,
             )
         except Exception as error:

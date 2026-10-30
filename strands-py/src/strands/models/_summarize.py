@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from .model import Model
 
 # Subject to change based on benchmarking.
-_DEFAULT_SUMMARIZER_SYSTEM_PROMPT = (
+_DEFAULT_SUMMARIZE_INSTRUCTIONS = (
     "You are a summarization assistant. Produce a concise factual summary that preserves:\n"
     "- Key data, values, and identifiers\n"
     "- Important decisions and conclusions\n"
@@ -48,7 +48,7 @@ async def _summarize_with_stream(
     model: "Model",
     messages: Messages,
     *,
-    summarizer_system_prompt: str | None = None,
+    instructions: str | None = None,
     cancel_signal: threading.Event | None = None,
 ) -> SummarizeResult:
     """Summarize ``messages`` with a tool-less :meth:`Model.stream` call on their delimited, flattened transcript."""
@@ -57,7 +57,7 @@ async def _summarize_with_stream(
     events = model.stream(
         request,
         tool_specs=None,
-        system_prompt=summarizer_system_prompt or _DEFAULT_SUMMARIZER_SYSTEM_PROMPT,
+        system_prompt=instructions or _DEFAULT_SUMMARIZE_INSTRUCTIONS,
         cancel_signal=cancel_signal,
     )
     summary, usage = await _read_summary(events)

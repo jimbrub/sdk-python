@@ -11,7 +11,7 @@ import { CitationsBlock } from '../../types/citations.js'
 import { TestModelProvider, collectGenerator } from '../../__fixtures__/model-test-helpers.js'
 import { MaxTokensError, ModelError } from '../../errors.js'
 import { Model } from '../model.js'
-import { DEFAULT_SUMMARIZER_SYSTEM_PROMPT } from '../summarize.js'
+import { DEFAULT_SUMMARIZE_INSTRUCTIONS } from '../summarize.js'
 import { mergeModelInfo, type ModelInfo } from '../model-info.js'
 import type { BaseModelConfig, StreamOptions } from '../model.js'
 import { isModelStreamEvent, type ModelStreamEvent } from '../streaming.js'
@@ -1335,7 +1335,7 @@ describe('summarize', () => {
   const usage = { inputTokens: 4, outputTokens: 5, totalTokens: 9 }
   const shape = (messages: Message[]) => messages.map(({ role, content, metadata }) => ({ role, content, metadata }))
 
-  it('streams a flattened transcript under the summarizer system prompt and returns the summary and usage', async () => {
+  it('streams a flattened transcript under the instructions and returns the summary and usage', async () => {
     const model = new MockMessageModel().addTurn({ type: 'textBlock', text: ' the summary ' }, { usage })
     const streamSpy = vi.spyOn(model, 'stream')
     const messages = [
@@ -1358,7 +1358,7 @@ describe('summarize', () => {
     const result = await model.summarize(messages, {
       systemPrompt: 'live prompt',
       toolSpecs: [toolSpec],
-      summarizerSystemPrompt: 'Keep ids',
+      instructions: 'Keep ids',
     })
 
     const [request, options] = streamSpy.mock.calls[0]!
@@ -1386,7 +1386,7 @@ describe('summarize', () => {
     expect(shape(messages)).toEqual(original)
   })
 
-  it('uses the default summarizer system prompt when none is given', async () => {
+  it('uses the default summarization system prompt without instructions', async () => {
     const model = new MockMessageModel().addTurn({ type: 'textBlock', text: 'summary' })
     const streamSpy = vi.spyOn(model, 'stream')
 
@@ -1406,7 +1406,7 @@ describe('summarize', () => {
         ],
       },
     ])
-    expect(options).toEqual({ systemPrompt: DEFAULT_SUMMARIZER_SYSTEM_PROMPT })
+    expect(options).toEqual({ systemPrompt: DEFAULT_SUMMARIZE_INSTRUCTIONS })
   })
 
   it('joins text and citation blocks with newlines and skips other blocks', async () => {
@@ -1521,7 +1521,7 @@ describe('summarize', () => {
 
     await model.summarize([text('user', 'task')], { cancelSignal })
 
-    expect(streamSpy.mock.calls[0]![1]).toEqual({ systemPrompt: DEFAULT_SUMMARIZER_SYSTEM_PROMPT, cancelSignal })
+    expect(streamSpy.mock.calls[0]![1]).toEqual({ systemPrompt: DEFAULT_SUMMARIZE_INSTRUCTIONS, cancelSignal })
   })
 
   it('returns an empty summary with the usage when the model writes no text', async () => {

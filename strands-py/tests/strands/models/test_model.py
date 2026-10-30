@@ -13,7 +13,7 @@ from strands.hooks.events import AfterInvocationEvent
 from strands.models import CacheConfig, ModelCapabilities, ModelInfo, ModelLimits, SummarizeResult
 from strands.models import Model as SAModel
 from strands.models._model_info import lookup_model_info
-from strands.models._summarize import _DEFAULT_SUMMARIZER_SYSTEM_PROMPT
+from strands.models._summarize import _DEFAULT_SUMMARIZE_INSTRUCTIONS
 from strands.models.model import _ModelPlugin
 
 
@@ -822,7 +822,7 @@ def _recording_stream(received, *texts, stop_reason="end_turn"):
 
 class TestSummarize:
     @pytest.mark.asyncio
-    async def test_streams_a_flattened_transcript_under_the_summarizer_system_prompt_and_returns_summary_and_usage(
+    async def test_streams_a_flattened_transcript_under_the_instructions_and_returns_summary_and_usage(
         self, model, tool_specs
     ):
         messages = [
@@ -846,7 +846,7 @@ class TestSummarize:
                 tool_specs=tool_specs,
                 system_prompt="live prompt",
                 system_prompt_content=[{"text": "live prompt"}],
-                summarizer_system_prompt="Keep ids",
+                instructions="Keep ids",
             )
 
         exp_request = [
@@ -872,7 +872,7 @@ class TestSummarize:
         assert messages == original
 
     @pytest.mark.asyncio
-    async def test_uses_the_default_summarizer_system_prompt_when_none_is_given(self, model):
+    async def test_uses_the_default_summarization_system_prompt_without_instructions(self, model):
         received = []
 
         with unittest.mock.patch.object(model, "stream", _recording_stream(received, "summary")):
@@ -891,7 +891,7 @@ class TestSummarize:
                 ],
             },
         ]
-        assert received == [(exp_request, None, _DEFAULT_SUMMARIZER_SYSTEM_PROMPT, {"cancel_signal": None})]
+        assert received == [(exp_request, None, _DEFAULT_SUMMARIZE_INSTRUCTIONS, {"cancel_signal": None})]
 
     @pytest.mark.asyncio
     async def test_forwards_the_cancel_signal_to_the_stream_call(self, model):

@@ -392,7 +392,7 @@ class Model(abc.ABC):
         tool_specs: list[ToolSpec] | None = None,
         system_prompt: str | None = None,
         system_prompt_content: list[SystemContentBlock] | None = None,
-        summarizer_system_prompt: str | None = None,
+        instructions: str | None = None,
         cancel_signal: threading.Event | None = None,
         **kwargs: Any,
     ) -> SummarizeResult:
@@ -419,7 +419,7 @@ class Model(abc.ABC):
             tool_specs: The live conversation's tool specifications, for an override.
             system_prompt: The live conversation's plain string system prompt, for an override.
             system_prompt_content: The live conversation's structured system prompt, for an override.
-            summarizer_system_prompt: System prompt for the summarizer, replacing the default one.
+            instructions: Summarization system prompt that replaces the default one.
             cancel_signal: Event that aborts the call, for an override and forwarded to the base stream call.
             **kwargs: Additional keyword arguments for future extensibility.
 
@@ -433,9 +433,7 @@ class Model(abc.ABC):
             Exception: Any other error the model's stream raises. A reply cut off at the output limit or stopped by a
                 guardrail gives an empty summary instead.
         """
-        return await _summarize_with_stream(
-            self, messages, summarizer_system_prompt=summarizer_system_prompt, cancel_signal=cancel_signal
-        )
+        return await _summarize_with_stream(self, messages, instructions=instructions, cancel_signal=cancel_signal)
 
     def estimate_utilization(self, input_tokens: int) -> float:
         """Estimate the fraction of the model's context window consumed by the given input token count.

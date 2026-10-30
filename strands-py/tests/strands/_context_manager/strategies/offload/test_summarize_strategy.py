@@ -9,7 +9,7 @@ from strands._context_manager.strategies.offload import Offload
 from strands._context_manager.strategies.offload.summarize import _compaction_split_index, _place_summary
 from strands._context_manager.types import ContextState
 from strands.models import SummarizeResult
-from strands.models._summarize import _DEFAULT_SUMMARIZER_SYSTEM_PROMPT
+from strands.models._summarize import _DEFAULT_SUMMARIZE_INSTRUCTIONS
 from strands.models.model import Model
 from strands.types.content import ContentBlock, Message, Messages
 from strands.types.tools import ToolResult, ToolUse
@@ -173,7 +173,7 @@ class TestSummarizeStrategyPerBlock:
         messages = [_text("user", "task"), _text("assistant", "x" * 10000), _text("user", "latest")]
 
         assert await strategy.apply(ContextState(messages=messages, agent=mock_agent, utilization=0.5)) is True
-        assert received == [_DEFAULT_SUMMARIZER_SYSTEM_PROMPT]
+        assert received == [_DEFAULT_SUMMARIZE_INSTRUCTIONS]
 
     @pytest.mark.asyncio
     async def test_summarizes_large_text_block(self, mock_agent):
@@ -581,7 +581,7 @@ class TestSummarizationWithToolCalls:
             tool_specs=[{"name": "read"}],
             system_prompt="live system prompt",
             system_prompt_content=[{"text": "live system prompt"}],
-            summarizer_system_prompt=None,
+            instructions=None,
             cancel_signal=routing_agent.cancel_signal,
         )
 
@@ -658,7 +658,7 @@ class TestSummarizeStrategyRouting:
             tool_specs=[{"name": "read"}],
             system_prompt="live system prompt",
             system_prompt_content=[{"text": "live system prompt"}],
-            summarizer_system_prompt="Keep ids",
+            instructions="Keep ids",
             cancel_signal=routing_agent.cancel_signal,
         )
         assert messages == [_tracked_summary(5), *original[5:]]
@@ -798,7 +798,7 @@ class TestSummarizeStrategyRouting:
             tool_specs=[{"name": "read"}],
             system_prompt="live system prompt",
             system_prompt_content=[{"text": "live system prompt"}],
-            summarizer_system_prompt=None,
+            instructions=None,
             cancel_signal=routing_agent.cancel_signal,
         )
 
