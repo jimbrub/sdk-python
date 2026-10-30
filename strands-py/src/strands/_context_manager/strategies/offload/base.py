@@ -11,7 +11,7 @@ from typing_extensions import TypedDict
 
 from ....agent.conversation_manager.compression.pin_message import _has_pinned_flag, is_pinned
 from ....agent.invocation_context import _invocation_context_kwargs
-from ....types.content import ContentBlock, Message, MessageMetadata, Messages
+from ....types.content import ContentBlock, Message, MessageMetadata, Messages, _ensure_tracking_id
 from ....types.tools import ToolUse
 from ...retrieval_tool import RETRIEVAL_TOOL_NAME
 from ...stash import MERGED_MESSAGES_KEY, Stash
@@ -274,6 +274,22 @@ def _merge_messages(prev: Message, current: Message) -> Message:
     metadata: MessageMetadata = {**current.get("metadata", {}), "custom": custom}
     merged["metadata"] = metadata
     return merged
+
+
+def _prepend_content(earlier: Message, message: Message) -> Message:
+    """Return ``message`` with ``earlier``'s content before its own, keeping ``message``'s tracking id and metadata.
+
+    ``metadata.custom.merged_messages`` records both, as ``_merge_messages`` does, so stash refs to ``message``'s
+    blocks still resolve after its content moves.
+    """
+    _ensure_tracking_id(earlier)
+    joined = Message(role=message["role"], content=[*earlier["content"], *message["content"]])
+    if "tracking_id" in message:
+        joined["tracking_id"] = message["tracking_id"]
+    parts = [*_merged_parts(earlier, 0), *_merged_parts(message, len(earlier["content"]))]
+    metadata = message.get("metadata", {})
+    joined["metadata"] = {**metadata, "custom": {**metadata.get("custom", {}), MERGED_MESSAGES_KEY: parts}}
+    return joined
 
 
 def _merged_parts(message: Message, offset: int) -> list[dict[str, Any]]:

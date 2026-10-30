@@ -21,6 +21,7 @@ from .base import (
     OffloadTarget,
     _build_conditions,
     _collect_removable_with_pair,
+    _prepend_content,
     _repair_alternation,
     _resolve_preserve_count,
 )
@@ -228,12 +229,19 @@ def _alternates_at(messages: Messages, position: int, role: Role) -> bool:
 
 
 def _join_or_insert(messages: Messages, position: int, role: Role, summary: Message) -> None:
-    """Append ``summary``'s content to the kept neighbor of ``role`` at ``position``, or insert it there alone."""
+    """Join ``summary``'s content to the kept neighbor of ``role`` at ``position``, or insert it there alone.
+
+    The summary covers the history before ``position``, so it ends the neighbor before it or opens the one after it.
+    The neighbor after it opens with no tool result: that result's tool use would be in the summarized run.
+    """
     carrier = _carrier(messages, position, role)
     if carrier is None:
         placed = Message(role=role, content=list(summary["content"]))
         _ensure_tracking_id(placed)
         messages.insert(position, placed)
+        return
+    if carrier == position:
+        messages[carrier] = _prepend_content(Message(role=role, content=list(summary["content"])), messages[carrier])
         return
     joined = messages[carrier].copy()
     joined["content"] = [*joined["content"], *summary["content"]]
@@ -255,7 +263,7 @@ async def _with_summarized_marker(summary: Message, summarized: Messages, model:
 
 
 def _carrier(messages: Messages, position: int, role: Role) -> int | None:
-    """Return the index of the kept neighbor of ``role`` the summary appends to, or None when it stands alone.
+    """Return the index of the kept neighbor of ``role`` the summary joins, or None when it stands alone.
 
     Message 0 is never a carrier unless the summary takes the place of the messages before it.
     """

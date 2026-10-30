@@ -68,6 +68,20 @@ function makeContext(messages: Message[], utilization = 0.5, model?: unknown): C
   }
 }
 
+/** The kept `value` message once `summary`, of the messages before it, opens its content. */
+function openedBySummary(summary: TextBlock, value: string, trackingId: string = anyTrackingId): Message {
+  const parts = [
+    { trackingId: anyTrackingId, offset: 0, metadata: {} },
+    { trackingId, offset: 1, metadata: {} },
+  ]
+  return new Message({
+    role: 'assistant',
+    content: [summary, new TextBlock(value)],
+    trackingId,
+    metadata: { custom: { mergedMessages: parts } },
+  })
+}
+
 describe('Offload.summarize', () => {
   it('creates a strategy with correct name', () => {
     const strategy = Offload.summarize('toolResults')
@@ -646,13 +660,7 @@ describe('routing through Model.summarize', () => {
     ]
 
     expect(await strategy.apply(makeRoutingContext(messages, 0.9, model))).toBe(true)
-    expect(messages).toEqual([
-      task,
-      ack,
-      note,
-      new Message({ role: 'assistant', content: [new TextBlock('a7'), marked(4)], trackingId: anyTrackingId }),
-      latest,
-    ])
+    expect(messages).toEqual([task, ack, note, openedBySummary(marked(4), 'a7'), latest])
   })
 
   it('skips the pass when every gap lies between pinned messages of both roles', async () => {
@@ -808,11 +816,7 @@ describe('routing through Model.summarize', () => {
     expect(received).toEqual([original.slice(1, 3)])
     expect(model.summarize).not.toHaveBeenCalled()
     expect(vi.mocked(Model.prototype.summarize).mock.contexts).toEqual([model])
-    expect(messages).toEqual([
-      task,
-      new Message({ role: 'assistant', content: [new TextBlock('old3'), marked(2)], trackingId: anyTrackingId }),
-      original[4],
-    ])
+    expect(messages).toEqual([task, openedBySummary(marked(2), 'old3'), original[4]])
   })
 
   it('leaves a pinned message before the cut out of the summary', async () => {
@@ -828,15 +832,7 @@ describe('routing through Model.summarize', () => {
     expect(await strategy.apply(makeRoutingContext(messages, 0.9, model))).toBe(true)
     expect(received).toEqual([[original[0], original[1], original[3], original[4]]])
     expect(model.summarize).not.toHaveBeenCalled()
-    expect(messages).toEqual([
-      pinned,
-      new Message({
-        role: 'assistant',
-        content: [new TextBlock('c'), marked(4)],
-        trackingId: original[5]!.trackingId,
-      }),
-      original[6],
-    ])
+    expect(messages).toEqual([pinned, openedBySummary(marked(4), 'c', original[5]!.trackingId), original[6]])
   })
 
   it('passes no instruction without a custom system prompt', async () => {
@@ -908,11 +904,7 @@ describe('routing through Model.summarize', () => {
     expect(model.summarize).not.toHaveBeenCalled()
     expect(messages).toEqual([
       original[0],
-      new Message({
-        role: 'assistant',
-        content: [new TextBlock('a'), marked(4)],
-        trackingId: original[3]!.trackingId,
-      }),
+      openedBySummary(marked(4), 'a', original[3]!.trackingId),
       original[4],
       original[7],
       original[8],
@@ -1050,13 +1042,13 @@ describe('summary placement', () => {
       task,
       toolUse,
       toolResult,
-      new Message({ role: 'assistant', content: [new TextBlock('a7'), marked(2)], trackingId: anyTrackingId }),
+      openedBySummary(marked(2), 'a7'),
       new Message({ role: 'user', content: [new TextBlock('u8')], trackingId: anyTrackingId }),
     ])
     expect(messages[2]!.content).toEqual(makeToolResultMessage('ok', 't1').content)
   })
 
-  it('appends a leading summary to the kept message so its stash refs still resolve', async () => {
+  it('opens the kept message with a leading summary so its stash refs still resolve', async () => {
     const model = new MockMessageModel()
     const summary = text('user', 'summary')
     const strategy = Offload.summarize('*', { model }).when({ utilization: 0.5, preserveRecent: 3 })
@@ -1067,10 +1059,14 @@ describe('summary placement', () => {
     const kept = messages.slice(2)
 
     expect(await strategy.apply(makeContext(messages, model, { summary }))).toBe(true)
-    expect(messages).toEqual([
-      new Message({ role: 'user', content: [...big.content, marked(2)], trackingId: 'id2', metadata }),
-      ...kept.slice(1),
-    ])
+    const carrier = messages[0]!
+    expect(carrier.content).toEqual([marked(2), ...big.content])
+    expect(carrier.trackingId).toBe('id2')
+    expect(carrier.metadata?.custom).toMatchObject({
+      source: 'upload',
+      mergedMessages: [{ offset: 0 }, { trackingId: 'id2', offset: 1, metadata }],
+    })
+    expect(messages.slice(1)).toEqual(kept.slice(1))
   })
 
   it('places a summary between two same-role messages on its own', async () => {

@@ -20,6 +20,7 @@ import { isPinned } from '../../../conversation-manager/compression/pin-message.
 import {
   BaseOffloadStrategy,
   collectRemovableWithPair,
+  prependContent,
   repairAlternation,
   resolvePreserveCount,
   type OffloadConditions,
@@ -223,11 +224,20 @@ function alternatesAt(messages: Message[], position: number, role: Role): boolea
   return messages.slice(Math.max(position - 1, 0), position + 1).every((neighbor) => neighbor.role !== role)
 }
 
-/** Appends `summary`'s content to the kept neighbor of `role` at `position`, or inserts it there alone. */
+/**
+ * Joins `summary`'s content to the kept neighbor of `role` at `position`, or inserts it there alone.
+ *
+ * The summary covers the history before `position`, so it ends the neighbor before it or opens the one after it.
+ * The neighbor after it opens with no tool result: that result's tool use would be in the summarized run.
+ */
 function joinOrInsert(messages: Message[], position: number, role: Role, summary: Message): void {
   const carrier = carrierIndex(messages, position, role)
   if (carrier === undefined) {
     messages.splice(position, 0, new Message({ role, content: summary.content }))
+    return
+  }
+  if (carrier === position) {
+    messages[carrier] = prependContent(new Message({ role, content: summary.content }), messages[carrier]!)
     return
   }
   const joined = messages[carrier]!
@@ -254,7 +264,7 @@ async function withSummarizedMarker(summary: Message, summarized: Message[], mod
 }
 
 /**
- * Returns the index of the kept neighbor of `role` the summary appends to, or undefined when it stands alone.
+ * Returns the index of the kept neighbor of `role` the summary joins, or undefined when it stands alone.
  *
  * Message 0 is never a carrier unless the summary takes the place of the messages before it.
  */

@@ -5,6 +5,7 @@ import unittest.mock
 
 import pytest
 
+from strands._context_manager.stash import _block_key
 from strands._context_manager.strategies.offload import Offload
 from strands._context_manager.strategies.offload.summarize import _compaction_split_index, _place_summary
 from strands._context_manager.types import ContextState
@@ -351,7 +352,7 @@ class TestSummarizeStrategyMessageLevel:
         exp_request = [_text("assistant", "old1"), _text("user", "old2")]
         routing_agent.model.summarize.assert_not_called()
         assert base_summarize.call_args.args == (routing_agent.model, exp_request)
-        exp_carrier = {"role": "assistant", "content": [{"text": "old3"}, _marked(2)]}
+        exp_carrier = _opened_by_summary("assistant", "old3", 2)
         assert messages == [task, exp_carrier, _text("user", "recent")]
 
     @pytest.mark.asyncio
@@ -444,7 +445,7 @@ class TestSummarizeStrategyMessageLevel:
             task,
             ack,
             note,
-            {"role": "assistant", "content": [{"text": "a7"}, _marked(4)]},
+            _opened_by_summary("assistant", "a7", 4),
             _text("user", "u8"),
         ]
 
@@ -513,7 +514,7 @@ class TestSummarizeStrategyMessageLevel:
         assert base_summarize.call_args.args == (routing_agent.model, exp_request)
         exp_messages = [
             original[2],
-            {"role": "assistant", "content": [{"text": "c"}, _marked(4)]},
+            _opened_by_summary("assistant", "c", 4),
             original[6],
         ]
         assert messages == exp_messages
@@ -873,7 +874,7 @@ class TestSummarizeStrategyRouting:
         assert base_summarize.call_args.args == (routing_agent.model, exp_request)
         exp_messages = [
             original[0],
-            {"role": "assistant", "content": [{"text": "a"}, _marked(4)]},
+            _opened_by_summary("assistant", "a", 4),
             original[4],
             original[7],
             original[8],
@@ -896,6 +897,16 @@ class TestSummarizeStrategyRouting:
 
 def _text(role, text):
     return {"role": role, "content": [{"text": text}]}
+
+
+def _opened_by_summary(role, text, count):
+    """The kept ``text`` message once the summary of the ``count`` messages before it opens its content."""
+    parts = [{"offset": 0, "metadata": {}, "tracking_id": unittest.mock.ANY}, {"offset": 1, "metadata": {}}]
+    return {
+        "role": role,
+        "content": [_marked(count), {"text": text}],
+        "metadata": {"custom": {"merged_messages": parts}},
+    }
 
 
 def _tool_use(tool_use_id):
@@ -1013,11 +1024,11 @@ class TestSummaryPlacement:
         messages += [_text("assistant", "a7"), _text("user", "u8")]
         assert await strategy.apply(ContextState(messages=messages, agent=routing_agent, utilization=0.9)) is True
 
-        exp_carrier = {"role": "assistant", "content": [{"text": "a7"}, _marked(2)]}
+        exp_carrier = _opened_by_summary("assistant", "a7", 2)
         assert messages == [task, tool_use, tool_result, exp_carrier, _text("user", "u8")]
 
     @pytest.mark.asyncio
-    async def test_appends_a_leading_summary_to_the_kept_message_so_its_stash_refs_still_resolve(self, routing_agent):
+    async def test_opens_the_kept_message_with_a_leading_summary_so_its_stash_refs_still_resolve(self, routing_agent):
         strategy = Offload.summarize("*").when(utilization=0.5, preserve_recent=3)
         metadata = {"custom": {"source": "upload"}}
         big = Message(role="user", content=[ContentBlock(text="x" * 10000)], tracking_id="id2", metadata=metadata)
@@ -1031,8 +1042,12 @@ class TestSummaryPlacement:
         kept = messages[2:]
 
         assert await strategy.apply(ContextState(messages=messages, agent=routing_agent, utilization=0.9)) is True
-        exp_carrier = {**big, "content": [*big["content"], _marked(2)]}
-        assert messages == [exp_carrier, *kept[1:]]
+        carrier = messages[0]
+        assert carrier["content"] == [_marked(2), *big["content"]]
+        assert carrier["tracking_id"] == "id2"
+        assert carrier["metadata"]["custom"]["source"] == "upload"
+        assert _block_key(carrier, 1) == "id2_0"
+        assert messages[1:] == kept[1:]
 
     @pytest.mark.asyncio
     async def test_places_a_summary_between_two_same_role_messages_on_its_own(self, routing_agent, base_summarize):

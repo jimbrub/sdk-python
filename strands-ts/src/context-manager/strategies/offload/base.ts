@@ -304,6 +304,25 @@ function mergeMessages(prev: Message, current: Message): Message {
   })
 }
 
+/**
+ * Returns `message` with `earlier`'s content before its own, keeping `message`'s tracking id and metadata.
+ *
+ * `metadata.custom.mergedMessages` records both, as {@link mergeMessages} does, so stash refs to `message`'s blocks
+ * still resolve after its content moves.
+ */
+export function prependContent(earlier: Message, message: Message): Message {
+  const parts = [...mergedParts(earlier, 0), ...mergedParts(message, earlier.content.length)]
+  return new Message({
+    role: message.role,
+    content: [...earlier.content, ...message.content],
+    trackingId: message.trackingId,
+    metadata: {
+      ...message.metadata,
+      custom: { ...message.metadata?.custom, [MERGED_MESSAGES_KEY]: parts as unknown as JSONValue },
+    },
+  })
+}
+
 /** Returns the messages `message` combines, at their offsets in a merge where its content starts at `offset`. */
 function mergedParts(message: Message, offset: number): MergedMessage[] {
   const parts = mergedMessages(message)
