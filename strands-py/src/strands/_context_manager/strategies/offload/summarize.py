@@ -260,11 +260,6 @@ def _carrier(messages: Messages, position: int, role: Role) -> int | None:
     return None
 
 
-def _overrides_summarize(model: Model) -> bool:
-    """Whether ``model`` replaces the base ``Model.summarize()``, as a server-side compaction does."""
-    return getattr(model.summarize, "__func__", None) is not Model.summarize
-
-
 def _record_summary_usage(invocation_context: InvocationContext | None, result: SummarizeResult) -> None:
     """Add a ``Model.summarize()`` call's usage, if it reported any, to the request it ran in."""
     if result.usage:
@@ -326,12 +321,11 @@ class SummarizeStrategy(BaseOffloadStrategy):
             return False
         return await super().apply(context)
 
-    async def _select(self, context: ContextState, model: Model) -> list[int]:
+    async def _select(self, context: ContextState) -> list[int]:
         """Return the indices of the messages this pass summarizes, in history order, leaving out pinned ones.
 
-        A recency-only pass takes the messages before the compaction cut, keeping message 0 verbatim unless
-        ``model`` overrides ``Model.summarize()`` for a server-side compaction of the conversation's start; a target
-        or threshold pass takes the eligible messages and their tool pairs.
+        A recency-only pass takes the messages before the compaction cut; a target or threshold pass takes the
+        eligible messages and their tool pairs.
         """
         messages = context.messages
         if self._target not in (None, "*") or self._threshold is not None:
@@ -339,8 +333,7 @@ class SummarizeStrategy(BaseOffloadStrategy):
             # Re-summarizing a lone earlier summary frees nothing.
             return [] if len(indices) == 1 and _is_summary(messages[indices[0]]) else indices
         split = _recency_split(messages, self._preserve_recent)
-        first = 0 if _overrides_summarize(model) else 1
-        selected = [index for index in range(first, split) if not is_pinned(messages, index)]
+        selected = [index for index in range(split) if not is_pinned(messages, index)]
         # After a pass behind a pinned message, the only unpinned message before the cut is that pass's summary.
         return selected if len(selected) > 1 else []
 
@@ -349,7 +342,7 @@ class SummarizeStrategy(BaseOffloadStrategy):
         model = self._resolve_model(context.agent)
         if not model:
             return False
-        indices = await self._select(context, model)
+        indices = await self._select(context)
         if not indices:
             return False
         messages = context.messages
