@@ -99,17 +99,20 @@ function summaryPlan(messages: Message[], indices: number[]): { indices: number[
  * Returns `summaryPlan` for `indices`, or, when it finds no slot, for `indices` without message 0.
  *
  * Kept, message 0 lets the summary follow it, which fits when the only slot at the start of the history lies
- * before a pinned message of the summary's role. A tool result paired with message 0 is kept with it.
+ * before a pinned message of the summary's role. A tool result paired with message 0 is kept with it. Undefined
+ * when neither finds a slot, or when the plan would summarize only an earlier summary.
  */
 function planAfterMessageZero(
   messages: Message[],
   indices: number[]
 ): { indices: number[]; slot: SummarySlot } | undefined {
-  const plan = summaryPlan(messages, indices)
-  if (plan || indices[0] !== 0) return plan
-  const keptHead = messages.length > 1 && splitsToolPair(messages, 1) ? 2 : 1
-  const rest = indices.filter((index) => index >= keptHead)
-  return rest.length > 0 ? summaryPlan(messages, rest) : undefined
+  let plan = summaryPlan(messages, indices)
+  if (!plan && indices[0] === 0) {
+    const keptHead = messages.length > 1 && splitsToolPair(messages, 1) ? 2 : 1
+    const rest = indices.filter((index) => index >= keptHead)
+    plan = rest.length > 0 ? summaryPlan(messages, rest) : undefined
+  }
+  return plan && !isLoneSummary(messages, plan.indices) ? plan : undefined
 }
 
 /** Splits sorted `indices` into runs of consecutive indices. */
@@ -166,6 +169,11 @@ function alternates(messages: Message[]): boolean {
 /** Whether `message` holds only `[Summarized: ...]` markers. */
 function isSummary(message: Message): boolean {
   return message.content.every((block) => block instanceof TextBlock && block.text.startsWith(SUMMARIZED_PREFIX))
+}
+
+/** Whether `indices` is one earlier summary, which re-summarizing frees nothing from. */
+function isLoneSummary(messages: Message[], indices: number[]): boolean {
+  return indices.length === 1 && isSummary(messages[indices[0]!]!)
 }
 
 /**
@@ -312,8 +320,7 @@ export class SummarizeStrategy extends BaseOffloadStrategy {
     const recencyOnly = (this._target === undefined || this._target === '*') && this._threshold === undefined
     if (!recencyOnly) {
       const indices = withToolPairs(messages, await this._getEligibleMessages(context))
-      // Re-summarizing a lone earlier summary frees nothing.
-      return indices.length === 1 && isSummary(messages[indices[0]!]!) ? [] : indices
+      return isLoneSummary(messages, indices) ? [] : indices
     }
     const split = recencySplit(messages, this._preserveRecent)
     const selected = Array.from({ length: split }, (_, index) => index).filter((index) => !isPinned(messages, index))
@@ -330,7 +337,9 @@ export class SummarizeStrategy extends BaseOffloadStrategy {
     const { messages, agent } = context
     const plan = planAfterMessageZero(messages, selected)
     if (!plan) {
-      logger.debug(`summarized=<${selected.length}> | no place outside pinned messages for the summary`)
+      logger.debug(
+        `summarized=<${selected.length}> | no place outside pinned messages for a summary that frees context`
+      )
       return false
     }
     const { indices, slot } = plan

@@ -99,14 +99,15 @@ def _plan_after_message_zero(messages: Messages, indices: list[int]) -> tuple[li
     """Return ``_summary_plan`` for ``indices``, or, when it finds no slot, for ``indices`` without message 0.
 
     Kept, message 0 lets the summary follow it, which fits when the only slot at the start of the history lies
-    before a pinned message of the summary's role. A tool result paired with message 0 is kept with it.
+    before a pinned message of the summary's role. A tool result paired with message 0 is kept with it. None when
+    neither finds a slot, or when the plan would summarize only an earlier summary.
     """
     plan = _summary_plan(messages, indices)
-    if plan is not None or not indices or indices[0] != 0:
-        return plan
-    kept_head = 2 if len(messages) > 1 and _splits_tool_pair(messages, 1) else 1
-    rest = [index for index in indices if index >= kept_head]
-    return _summary_plan(messages, rest) if rest else None
+    if plan is None and indices and indices[0] == 0:
+        kept_head = 2 if len(messages) > 1 and _splits_tool_pair(messages, 1) else 1
+        rest = [index for index in indices if index >= kept_head]
+        plan = _summary_plan(messages, rest) if rest else None
+    return None if plan is None or _is_lone_summary(messages, plan[0]) else plan
 
 
 def _runs(indices: list[int]) -> list[list[int]]:
@@ -149,6 +150,11 @@ def _alternates(messages: Messages) -> bool:
 def _is_summary(message: Message) -> bool:
     """Whether ``message`` holds only ``[Summarized: ...]`` markers."""
     return all(block.get("text", "").startswith(_SUMMARIZED_PREFIX) for block in message["content"])
+
+
+def _is_lone_summary(messages: Messages, indices: list[int]) -> bool:
+    """Whether ``indices`` is one earlier summary, which re-summarizing frees nothing from."""
+    return len(indices) == 1 and _is_summary(messages[indices[0]])
 
 
 def _slot_role(messages: Messages, run: list[int]) -> Role | None:
@@ -330,8 +336,7 @@ class SummarizeStrategy(BaseOffloadStrategy):
         messages = context.messages
         if self._target not in (None, "*") or self._threshold is not None:
             indices = _with_tool_pairs(messages, await self._get_eligible_messages(context))
-            # Re-summarizing a lone earlier summary frees nothing.
-            return [] if len(indices) == 1 and _is_summary(messages[indices[0]]) else indices
+            return [] if _is_lone_summary(messages, indices) else indices
         split = _recency_split(messages, self._preserve_recent)
         selected = [index for index in range(split) if not is_pinned(messages, index)]
         # After a pass behind a pinned message, the only unpinned message before the cut is that pass's summary.
@@ -348,7 +353,9 @@ class SummarizeStrategy(BaseOffloadStrategy):
         messages = context.messages
         plan = _plan_after_message_zero(messages, indices)
         if plan is None:
-            logger.debug("summarized=<%s> | no place outside pinned messages for the summary", len(indices))
+            logger.debug(
+                "summarized=<%s> | no place outside pinned messages for a summary that frees context", len(indices)
+            )
             return False
         indices, slot = plan
         agent = context.agent

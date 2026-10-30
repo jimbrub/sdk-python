@@ -358,7 +358,7 @@ class TestSummarizeStrategyMessageLevel:
     async def test_keeps_message_zero_when_the_only_slot_before_it_lies_before_a_pinned_user_message(
         self, routing_agent, base_summarize
     ):
-        # Regression test for https://github.com/strands-agents/harness-sdk/pull/5470#issuecomment-6527709380
+        # Summarized with the rest, the task would leave a user-role summary that joins the pinned prompt.
         strategy = Offload.summarize("*").when(utilization=0.5, preserve_recent=2)
         prompt = Message(role="user", content=[ContentBlock(text="now add tests")], metadata=PINNED)
         messages: Messages = [_text("user", "task"), _tool_use("t1"), _tool_result("t1"), _tool_use("t2")]
@@ -370,6 +370,36 @@ class TestSummarizeStrategyMessageLevel:
         assert base_summarize.call_args.args == (routing_agent.model, original[1:6])
         exp_summary = {"role": "assistant", "content": [_marked(5)], "tracking_id": unittest.mock.ANY}
         assert messages == [_text("user", "task"), exp_summary, prompt, _text("assistant", "ok")]
+
+    @pytest.mark.asyncio
+    async def test_skips_the_pass_when_the_only_message_after_message_zero_is_an_earlier_summary(
+        self, routing_agent, base_summarize
+    ):
+        # The second pass has only the first pass's summary left to summarize, which frees nothing.
+        strategy = Offload.summarize("*").when(utilization=0.5, preserve_recent=2)
+        prompt = Message(role="user", content=[ContentBlock(text="now add tests")], metadata=PINNED)
+        messages: Messages = [_text("user", "task"), _tool_use("t1"), _tool_result("t1"), _tool_use("t2")]
+        messages += [_tool_result("t2"), _text("assistant", "done"), prompt, _text("assistant", "ok")]
+        assert await strategy.apply(ContextState(messages=messages, agent=routing_agent, utilization=0.9)) is True
+        compacted = list(messages)
+        base_summarize.reset_mock()
+
+        assert await strategy.apply(ContextState(messages=messages, agent=routing_agent, utilization=0.9)) is False
+        base_summarize.assert_not_called()
+        assert messages == compacted
+
+    @pytest.mark.asyncio
+    async def test_skips_the_pass_when_only_an_earlier_summary_can_be_removed(self, routing_agent, base_summarize):
+        # Removing u2 would join the pinned a1 and a3, so only the summary at message 0 is left to summarize.
+        strategy = Offload.summarize("*").when(utilization=0.5, preserve_recent=2)
+        pinned = Message(role="assistant", content=[ContentBlock(text="a1")], metadata=PINNED)
+        messages: Messages = [{"role": "user", "content": [_marked(3)]}, pinned, _text("user", "u2")]
+        messages += [_text("assistant", "a3"), _text("user", "recent")]
+        original = list(messages)
+
+        assert await strategy.apply(ContextState(messages=messages, agent=routing_agent, utilization=0.9)) is False
+        base_summarize.assert_not_called()
+        assert messages == original
 
     @pytest.mark.asyncio
     async def test_keeps_the_summary_out_of_a_pinned_assistant_message_so_the_next_pass_summarizes_it(

@@ -726,8 +726,8 @@ describe('routing through Model.summarize', () => {
     expect(messages).toEqual(original)
   })
 
-  // Regression test for https://github.com/strands-agents/harness-sdk/pull/5470#issuecomment-6527709380
   it('keeps message 0 when the only slot before it lies before a pinned user message', async () => {
+    // Summarized with the rest, the task would leave a user-role summary that joins the pinned prompt.
     const model = new MockMessageModel()
     const received = mockSummarize(model)
     const strategy = Offload.summarize('*', { model }).when({ utilization: 0.5, preserveRecent: 2 })
@@ -749,6 +749,45 @@ describe('routing through Model.summarize', () => {
       prompt,
       original[7],
     ])
+  })
+
+  it('skips the pass when the only message after message 0 is an earlier summary', async () => {
+    // The second pass has only the first pass's summary left to summarize, which frees nothing.
+    const model = new MockMessageModel()
+    const received = mockSummarize(model)
+    const strategy = Offload.summarize('*', { model }).when({ utilization: 0.5, preserveRecent: 2 })
+    const prompt = new Message({
+      role: 'user',
+      content: [new TextBlock('now add tests')],
+      metadata: { custom: { pinned: true } },
+    })
+    const messages = [text('user', 'task'), toolUse('t1'), makeToolResultMessage('x', 't1'), toolUse('t2')]
+    messages.push(makeToolResultMessage('x', 't2'), text('assistant', 'done'), prompt, text('assistant', 'ok'))
+    expect(await strategy.apply(makeRoutingContext(messages, 0.9, model))).toBe(true)
+    const compacted = [...messages]
+
+    expect(await strategy.apply(makeRoutingContext(messages, 0.9, model))).toBe(false)
+    expect(received).toHaveLength(1)
+    expect(messages).toEqual(compacted)
+  })
+
+  it('skips the pass when only an earlier summary can be removed', async () => {
+    // Removing u2 would join the pinned a1 and a3, so only the summary at message 0 is left to summarize.
+    const model = new MockMessageModel()
+    const received = mockSummarize(model)
+    const strategy = Offload.summarize('*', { model }).when({ utilization: 0.5, preserveRecent: 2 })
+    const pinned = new Message({
+      role: 'assistant',
+      content: [new TextBlock('a1')],
+      metadata: { custom: { pinned: true } },
+    })
+    const messages = [new Message({ role: 'user', content: [marked(3)] }), pinned, text('user', 'u2')]
+    messages.push(text('assistant', 'a3'), text('user', 'recent'))
+    const original = [...messages]
+
+    expect(await strategy.apply(makeRoutingContext(messages, 0.9, model))).toBe(false)
+    expect(received).toHaveLength(0)
+    expect(messages).toEqual(original)
   })
 
   it('summarizes the messages after a pinned task into assistant content behind it', async () => {
